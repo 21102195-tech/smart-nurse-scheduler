@@ -19,10 +19,10 @@ if "optimized_result" not in st.session_state:
 
 # 사이드바 - 관리자 메뉴
 st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
-uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
-uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_rules = st.sidebar.file_uploader("1. 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_schedule = st.sidebar.file_uploader("2. 템플릿 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
 
-# [새 파일 업로드 감지 시스템] 파일이 교체되면 세션을 즉시 초기화하여 갱신
+# [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
 if uploaded_schedule:
     file_key = f"{uploaded_schedule.name}_{uploaded_schedule.size}"
     if "last_file_key" not in st.session_state or st.session_state["last_file_key"] != file_key:
@@ -30,27 +30,31 @@ if uploaded_schedule:
         st.session_state["schedule_df_state"] = None  
         st.session_state["optimized_result"] = None   
 
-# [초강력 지능형 이름 및 야간전담 판정 파서]
+# ⭐ [지능형 가변 이름 및 야간전담 판정 파서]
+# 숫자 번호(1, 2)는 물론 실제 한글 성함(홍길동, 김미영)도 누락 없이 100% 정상 파싱합니다.
 def parse_nurse_row(name, group):
     name_str = str(name).strip() if pd.notna(name) else ""
     group_str = str(group).strip() if pd.notna(group) else ""
     
-    if not name_str or name_str.lower() == 'nan':
+    # 공백이나 nan, 테이블 헤더 성격의 문자열은 간호사에서 제외(필터링)
+    if not name_str or name_str.lower() in ['nan', '이름', '그룹', 'none', 'null', '', '토', '일', '월', '화', '수', '목', '금', '요일']:
         return None, False
         
+    # '듀티별 인원수' 행 배제
+    if "듀티별" in group_str or "인원수" in group_str:
+        return None, False
+        
+    # 야간전담 여부 검사
     is_keeper = "야간전담" in name_str or "야간전담" in group_str
     
+    # float 형태 포맷 클렌징 (예: "1.0" -> "1")
     clean_name = name_str
     if clean_name.endswith('.0'):
         clean_name = clean_name[:-2]
         
-    match = re.search(r'\d+', clean_name)
-    if match:
-        nurse_id = int(match.group())
-        return nurse_id, is_keeper
-    return None, is_keeper
+    return clean_name, is_keeper
 
-# [보정 함수] 업로드 엑셀의 헤더 위치 밀림 현상 자동 보정
+# [보정 함수] 헤더 밀림 방지 보정
 def load_and_align_headers(df):
     if '그룹' in df.columns:
         df.columns = [str(col).strip().replace('.0', '') for col in df.columns]
@@ -88,19 +92,16 @@ def get_nurse_penalty(row, i, nurse_wanted_off, num_days, forbidden_5_patterns, 
         if (d+1) in nurse_wanted_off[i] and row[d] != 'OFF':
             penalty += 1000000
             
-    # [야간전담 전용 규칙 분기 처리]
     if is_night_keeper:
         # 야간전담 규칙 A: D, E 근무 절대 배정 금지
         for d in range(num_days):
             if row[d] in ['D', 'E']:
                 penalty += 1000000
-        
-        # 야간전담 규칙 B: 한 달 총 밤근무(N)는 정확히 15개여야 함
+        # 야간전담 규칙 B: 한 달 총 밤근무(N) 정확히 15개
         total_N = sum(1 for x in row if x == 'N')
         if total_N != 15:
             penalty += abs(total_N - 15) * 500000
     else:
-        # [일반 교대 간호사 규칙]
         # 규칙 2: 한 달 밤근무(N) 5~6개 균등화
         total_N = sum(1 for x in row if x == 'N')
         if total_N < 5 or total_N > 6:
@@ -111,7 +112,6 @@ def get_nurse_penalty(row, i, nurse_wanted_off, num_days, forbidden_5_patterns, 
         if total_OFF < 12 or total_OFF > 13:
             penalty += (abs(total_OFF - 12.5) - 0.5) * 400000
         
-    # 공통 피로도 제어 규칙
     consec_work = 0
     consec_N = 0
     for d in range(num_days):
@@ -130,7 +130,7 @@ def get_nurse_penalty(row, i, nurse_wanted_off, num_days, forbidden_5_patterns, 
             
         if shift == 'N':
             consec_N += 1
-            if consec_N > 3: # 연속 밤근무 최대 3일 차단
+            if consec_N > 3: 
                 penalty += (consec_N - 3) * 500000
         else:
             consec_N = 0
@@ -244,7 +244,12 @@ if st.session_state["schedule_df_state"] is not None:
                 
         col1, col2 = st.columns(2)
         with col1:
-            selected_nurse = st.selectbox("1. 본인의 이름을 선택하세요", nurse_names, format_func=lambda x: f"{x}번 간호사")
+            # ⭐ 간호사 이름이 숫자인 경우와 문자 한글인 경우를 분기해 깔끔하게 출력
+            selected_nurse = st.selectbox(
+                "1. 본인의 이름을 선택하세요", 
+                nurse_names, 
+                format_func=lambda x: f"{x}번 간호사" if str(x).replace('.0', '').isdigit() else f"{x} 간호사"
+            )
         with col2:
             selected_offs = st.multiselect("2. 희망 휴무일을 복수 선택하세요", list(range(1, 32)))
             
@@ -253,11 +258,11 @@ if st.session_state["schedule_df_state"] is not None:
                 offs_str = ", ".join(map(str, sorted(selected_offs)))
                 for idx, row in df_temp.iterrows():
                     nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-                    if nurse_id == selected_nurse:
+                    if str(nurse_id) == str(selected_nurse):
                         df_temp.loc[idx, '원티드 오프'] = offs_str
                         break
                 st.session_state["schedule_df_state"] = df_temp
-                st.success(f"✔️ {selected_nurse}번 간호사: {offs_str}일 OFF 신청 완료!")
+                st.success(f"✔️ {selected_nurse} 간호사: {offs_str}일 OFF 신청 완료!")
             else:
                 st.warning("날짜를 선택해 주세요.")
                 
@@ -279,6 +284,8 @@ if st.session_state["schedule_df_state"] is not None:
             else:
                 with st.spinner("야간전담 대상자 분류 및 잠금 마스크 활성화 중..."):
                     df_clean = st.session_state["schedule_df_state"].copy()
+                    
+                    df_clean = df_clean.replace(r'^\s*$', np.nan, regex=True)
                     df_clean['그룹'] = df_clean['그룹'].ffill()
                     
                     # 1. 간호사 추출 및 야간전담 분류
@@ -307,6 +314,12 @@ if st.session_state["schedule_df_state"] is not None:
                             
                     # 2. 요구 인원수 파싱
                     requirements = {}
+                    default_values = {
+                        'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
+                        'E': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
+                        'N': [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+                    }
+                    
                     start_idx = None
                     for idx, row in enumerate(df_clean.values):
                         row_str = " ".join([str(x) for x in row])
@@ -328,26 +341,28 @@ if st.session_state["schedule_df_state"] is not None:
                                 if duty:
                                     day_values = []
                                     for d in range(1, 32):
-                                        col_name = str(d) if str(d) in df_clean.columns else (int(d) if int(d) in df_clean.columns else d)
-                                        if col_name in df_clean.columns:
+                                        col_name = None
+                                        for col in df_clean.columns:
+                                            if str(col).strip().replace('.0', '') == str(d):
+                                                col_name = col
+                                                break
+                                        
+                                        val = None
+                                        if col_name is not None:
                                             try:
-                                                day_values.append(int(float(row[col_name])))
-                                            except:
+                                                val = int(float(row[col_name]))
+                                            except (ValueError, TypeError):
                                                 pass
-                                    if len(day_values) == 31:
-                                        requirements[duty] = day_values
+                                        
+                                        if val is None or np.isnan(val):
+                                            val = default_values[duty][d-1]
+                                            
+                                        day_values.append(val)
+                                    requirements[duty] = day_values
 
-                    # [스마트 폴백 장치]
-                    default_D = [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4]
-                    default_E = [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4]
-                    default_N = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
-                    
-                    if 'D' not in requirements or len(requirements['D']) != 31:
-                        requirements['D'] = default_D
-                    if 'E' not in requirements or len(requirements['E']) != 31:
-                        requirements['E'] = default_E
-                    if 'N' not in requirements or len(requirements['N']) != 31:
-                        requirements['N'] = default_N
+                    for duty in ['D', 'E', 'N']:
+                        if duty not in requirements or len(requirements[duty]) != 31:
+                            requirements[duty] = default_values[duty]
                             
                     num_nurses = len(nurses)
                     num_days = 31
@@ -393,7 +408,7 @@ if st.session_state["schedule_df_state"] is not None:
                     temp = 25.0
                     cooling_rate = 0.9999
                     
-                    # 5. 최적화 루프 (고정 스케줄 자리 잠금 체크)
+                    # 5. 최적화 루프
                     for step in range(max_iter):
                         d = random.randint(0, num_days - 1)
                         i1 = random.randint(0, num_nurses - 1)
@@ -401,7 +416,6 @@ if st.session_state["schedule_df_state"] is not None:
                         while i1 == i2:
                             i2 = random.randint(0, num_nurses - 1)
                             
-                        # [고정 근무 보호] 고정된 자리가 하나라도 있다면 패스
                         if is_fixed[i1, d] or is_fixed[i2, d]:
                             continue
                             
