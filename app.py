@@ -18,10 +18,10 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# 3. 사이드바 - 관리자 메뉴 및 부서별 규칙 설정판
+# ⭐ 3. 사이드바 - 관리자 메뉴 및 업로드 버튼 (선생님 화면의 실제 명칭과 100% 매칭 완료!)
 st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
-uploaded_rules = st.sidebar.file_uploader("1. 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
-uploaded_schedule = st.sidebar.file_uploader("2. 템플릿 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
 uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
 
 # 🛠️ [부서별 맞춤 근무 조건 설정 - 전면 개정]
@@ -171,7 +171,6 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off, num_days, forbidden_5_pa
         shift = row[d]
         if shift != 'OFF':
             consec_work += 1
-            # 슬라이더 값이 0보다 클 때만 연속 근무 일수 제한 적용 (0일 시 무제한 허용)
             if limit_max_consec_work > 0:
                 if consec_work > limit_max_consec_work and d >= history_len:
                     penalty += (consec_work - limit_max_consec_work) * 500000
@@ -186,7 +185,6 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off, num_days, forbidden_5_pa
             
         if shift == 'N':
             consec_N += 1
-            # 슬라이더가 지정한 '연속 나이트 한도' 계산
             if consec_N > limit_max_consec_night and d >= history_len:  
                 penalty += (consec_N - limit_max_consec_night) * 500000
         else:
@@ -200,7 +198,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off, num_days, forbidden_5_pa
                 if shift == 'N' and next_shift in ['D', 'E']:
                     penalty += 500000
                 
-        # ⭐ [조건 On/Off] 야간 근무(N) 후 2일 OFF 필수 부여
+        # [조건 On/Off] 야간 근무(N) 후 2일 OFF 필수 부여
         if shift == 'N' and rule_night_after_2_off:
             if d < num_total - 1:
                 if row[d+1] != 'N':
@@ -289,7 +287,18 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
                 pool_idx += 1
     return sched
 
-# 4. 메인 인터페이스부
+# 4. 파일 데이터 로드 및 갱신 시스템
+if uploaded_schedule and st.session_state["schedule_df_state"] is None:
+    try:
+        if uploaded_schedule.name.endswith('xlsx'):
+            raw_df = pd.read_excel(uploaded_schedule)
+        else:
+            raw_df = pd.read_csv(uploaded_schedule, encoding='utf-8-sig')
+        st.session_state["schedule_df_state"] = load_and_align_headers(raw_df)
+    except Exception as e:
+        st.error(f"템플릿 파일을 읽는 중 오류가 발생했습니다: {e}")
+
+# 5. 메인 인터페이스부
 if st.session_state["schedule_df_state"] is not None:
     tab_apply, tab_check, tab_result = st.tabs([
         "🙋‍♀️ [간호사용] 원티드 오프 신청", 
@@ -571,4 +580,4 @@ if st.session_state["schedule_df_state"] is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 else:
-    st.info("👈 시작하려면 왼쪽 사이드바에서 '2. 근무표 템플릿 파일'을 가장 먼저 업로드해 주세요.")
+    st.info("👈 시작하려면 왼쪽 사이드바에서 '2. 초기 근무표 템플릿 업로드' 파일을 가장 먼저 업로드해 주세요.")
