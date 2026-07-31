@@ -5,14 +5,19 @@ import random
 import copy
 import io
 import re
+import os
 import requests
 from datetime import datetime
 
 # 1. 웹페이지 기본 설정
-st.set_page_config(page_title="간호사 스마트 스케줄링 시스템", layout="wide")
+st.set_page_config(page_title="간호사 스마트 3교대 스케줄러", layout="wide")
 
-# ⭐ [구글 API 주소 연동]: 1단계에서 복사해 둔 구글 웹 앱 URL 주소를 여기에 넣어주세요!
-GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"
+st.title("🏥 3교대 간호사 스마트 근무표 작성 & 신청 시스템")
+st.subheader("모바일 원티드 신청 포털과 수간호사 제어판이 구글 데이터베이스를 통해 실시간 연동됩니다.")
+
+# ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 넣어주세요!
+GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec
+"
 
 # 구글 데이터 읽어오기 함수
 def fetch_google_sheet_data():
@@ -24,24 +29,359 @@ def fetch_google_sheet_data():
         st.sidebar.error(f"구글 연동 실패: {e}")
     return []
 
-# 화면 상단 구성
-st.title("🏥 스마트 병동 3교대 스케줄링 & 원티드 시스템")
+# 2. ⭐ [서버 디스크 공유 데이터베이스 엔진]: 
+# 다른 사용자나 스마트폰이 접속해도 서버에 저장된 엑셀 파일을 읽어와 실시간 공유합니다!
+if "schedule_df_state" not in st.session_state:
+    if os.path.exists("template_shared.xlsx"):
+        try:
+            st.session_state["schedule_df_state"] = pd.read_excel("template_shared.xlsx")
+        except:
+            st.session_state["schedule_df_state"] = None
+    else:
+        st.session_state["schedule_df_state"] = None
 
-# 2. 탭 분할 (간호사용 신청 화면과 수간호사용 관리자 모드 분리)
-menu = st.radio("👉 사용 유형을 선택하세요", ["🙋‍♀️ [간호사용] 원티드 오프 신청", "⚙️ [수간호사용] 관리자 제어판"], horizontal=True)
+# 자동 싱크 로직 (최초 접속 시 구글 시트의 최신 신청 내역 자동 결합)
+if "synced_once" not in st.session_state:
+    st.session_state["synced_once"] = False
 
-# ----------------- [뷰 1] 간호사용 원티드 오프 신청 포털 -----------------
-if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
-    st.markdown("---")
-    st.write("### 📅 원하는 휴무일 직접 신청")
-    st.info("💡 원하는 휴가 날짜를 지정하고 신청을 완료하면, 구글 스프레드시트에 신청 시간과 함께 실시간 저장됩니다.")
-    
+if st.session_state["schedule_df_state"] is not None and not st.session_state["synced_once"]:
     sheet_data = fetch_google_sheet_data()
-    
     if len(sheet_data) > 0:
-        nurse_names = [item['name'] for item in sheet_data]
+        df_temp = st.session_state["schedule_df_state"].copy()
+        for item in sheet_data:
+            nurse_name = str(item['name']).strip()
+            wanted_val = str(item['wanted_off']).strip()
+            for idx, row in df_temp.iterrows():
+                nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+                if str(nurse_id) == nurse_name:
+                    df_temp.loc[idx, '원티드 오프'] = wanted_val
+                    break
+        st.session_state["schedule_df_state"] = df_temp
+    st.session_state["synced_once"] = True
+
+# 3. 사이드바 - 관리자 메뉴 및 업로드 버튼
+st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
+uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
+
+# 🛠 [부서별 맞춤 근무 조건 설정]
+st.sidebar.markdown("---")
+st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
+
+rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True)
+rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True)
+rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True)
+rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True)
+
+limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, 5)
+limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, 6)
+limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, 3)
+limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 4, 2)
+
+# [지능형 가변 이름 및 야간전담 판정 파서]
+def parse_nurse_row(name, group):
+    name_str = str(name).strip() if pd.notna(name) else ""
+    group_str = str(group).strip() if pd.notna(group) else ""
+    
+    if not name_str or name_str.lower() in ['nan', '이름', '그룹', 'none', 'null', '', '토', '일', '월', '화', '수', '목', '금', '요일']:
+        return None, False
         
-        # 일별 실시간 신청 인원 집계
+    if "듀티별" in group_str or "인원수" in group_str:
+        return None, False
+        
+    is_keeper = "야간전담" in name_str or "야간전담" in group_str
+    
+    clean_name = name_str
+    if clean_name.endswith('.0'):
+        clean_name = clean_name[:-2]
+        
+    return clean_name, is_keeper
+
+# [보정 함수] 헤더 밀림 방지 보정
+def load_and_align_headers(df):
+    if '그룹' in df.columns:
+        df.columns = [str(col).strip().replace('.0', '') for col in df.columns]
+        return df
+    
+    for idx in range(min(5, len(df))):
+        row_vals = [str(x).strip() for x in df.iloc[idx].values]
+        if '그룹' in row_vals or '그룹 ' in row_vals:
+            new_cols = []
+            for col_val in df.iloc[idx].values:
+                val = str(col_val).strip() if pd.notna(col_val) else ""
+                if val.endswith('.0'):
+                    val = val[:-2]
+                new_cols.append(val)
+            df.columns = new_cols
+            df = df.iloc[idx+1:].reset_index(drop=True)
+            break
+    return df
+
+# [이전 달 정보 추출기]
+def extract_nurse_history(prev_df, nurse_name):
+    try:
+        df_aligned = load_and_align_headers(prev_df)
+        day_cols = []
+        for col in df_aligned.columns:
+            col_str = str(col).strip()
+            if col_str.isdigit():
+                day_cols.append(int(col_str))
+                
+        day_cols.sort()
+        last_7_days = day_cols[-7:]
+        
+        for idx, row in df_aligned.iterrows():
+            name = row['이름']
+            group = row['그룹'] if '그룹' in df_aligned.columns else ""
+            nurse_id, _ = parse_nurse_row(name, group)
+            if nurse_id is not None and str(nurse_id) == str(nurse_name):
+                shifts = []
+                for d in last_7_days:
+                    col_name = str(d) if str(d) in df_aligned.columns else (int(d) if int(d) in df_aligned.columns else d)
+                    val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
+                    if val in ['D', '데이', 'DAY']: val = 'D'
+                    elif val in ['E', '이브', '이브닝', 'EVENING']: val = 'E'
+                    elif val in ['N', '나이트', 'NIGHT']: val = 'N'
+                    elif val in ['DE']: val = 'DE'
+                    elif '교육' in val: val = '교육'
+                    else: val = 'OFF'
+                    shifts.append(val)
+                return shifts
+    except Exception as e:
+        pass
+    return ['OFF'] * 7
+
+# 벌점 계산 수식 정의
+def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row):
+    row_norm = []
+    for x in (list(history) + list(row_current)):
+        if x == '교육':
+            row_norm.append('D')
+        else:
+            row_norm.append(x)
+            
+    num_total = len(row_norm)
+    history_len = len(history)
+    
+    penalty = 0
+    # 규칙 1: 원티드 오프 준수
+    for d in range(history_len, num_total):
+        current_day = d - history_len + 1
+        if current_day in nurse_wanted_off_set and row_norm[d] != 'OFF':
+            if not is_fixed_row[current_day - 1]:
+                penalty += 1000000
+            
+    if is_night_keeper:
+        for d in range(history_len, num_total):
+            if row_norm[d] in ['D', 'E', 'DE']:
+                penalty += 1000000
+        total_N = sum(1 for x in row_norm[history_len:] if x == 'N')
+        if total_N != 15:
+            penalty += abs(total_N - 15) * 500000
+    else:
+        # 규칙 2: 한 달 밤근무(N) 개수 균등화 (수학적으로 실시간 계산된 타겟 반영)
+        total_N = sum(1 for x in row_norm[history_len:] if x == 'N')
+        if limit_max_monthly_night == 0:
+            if total_N > 0:
+                penalty += total_N * 1000000
+        else:
+            if total_N < target_N_min or total_N > target_N_max:
+                mid = (target_N_min + target_N_max) / 2.0
+                half_w = (target_N_max - target_N_min) / 2.0
+                penalty += (abs(total_N - mid) - half_w) * 500000
+            
+        # 규칙 3: 한 달 총 휴무(OFF) 개수 자동 조정
+        total_OFF = sum(1 for x in row_norm[history_len:] if x == 'OFF')
+        if total_OFF < target_OFF_min or total_OFF > target_OFF_max:
+            mid = (target_OFF_min + target_OFF_max) / 2.0
+            half_w = (target_OFF_max - target_OFF_min) / 2.0
+            penalty += (abs(total_OFF - mid) - half_w) * 400000
+        
+    consec_work = 0
+    consec_N = 0
+    for d in range(num_total):
+        shift = row_norm[d]
+        if shift != 'OFF':
+            consec_work += 1
+            if limit_max_consec_work > 0:
+                if consec_work > limit_max_consec_work and d >= history_len:
+                    penalty += (consec_work - limit_max_consec_work) * 500000
+        else:
+            # [조건 On/Off] 5일 연속 근무 후 2 OFF 연속 보장
+            if rule_5_consec_off:
+                if consec_work == 5:
+                    if d + 1 < num_total:
+                        if row_norm[d+1] != 'OFF' and (d+1) >= history_len:
+                            penalty += 300000
+            consec_work = 0
+            
+        if shift == 'N':
+            consec_N += 1
+            if consec_N > limit_max_consec_night and d >= history_len:  
+                penalty += (consec_N - limit_max_consec_night) * 500000
+        else:
+            consec_N = 0
+            
+        if d < num_total - 1:
+            next_shift = row_norm[d+1]
+            if (d+1) >= history_len:
+                if shift == 'E' and next_shift in ['D', 'DE']:
+                    penalty += 500000
+                if shift == 'N' and next_shift in ['D', 'E', 'DE']:
+                    penalty += 500000
+                
+        # [조건 On/Off] 야간 근무(N) 후 2일 OFF 필수 부여
+        if shift == 'N' and rule_night_after_2_off:
+            if d < num_total - 1:
+                if row_norm[d+1] != 'N':
+                    if row_norm[d+1] != 'OFF' and (d+1) >= history_len:
+                        penalty += 500000
+                    if d < num_total - 2:
+                        if row_norm[d+2] != 'OFF' and (d+2) >= history_len:
+                            penalty += 500000
+                            
+        if d <= num_total - 5:
+            pat = list(row_norm[d:d+5])
+            if (d+4) >= history_len:
+                if pat in forbidden_5_patterns:
+                    penalty += 500000
+                
+    # [조건 On/Off] 단독 나이트 방지
+    if rule_no_single_night:
+        for d in range(history_len, num_total):
+            if row_norm[d] == 'N':
+                prev_is_N = (d > 0 and row_norm[d-1] == 'N')
+                next_is_N = (d < num_total - 1 and row_norm[d+1] == 'N')
+                if not prev_is_N and not next_is_N:
+                    penalty += 300000
+                
+    return penalty
+
+# 그룹별 일별 듀티 인원수 균형도 평가 함수
+def get_day_penalty(col, num_nurses, nurse_groups):
+    if not rule_group_balance:
+        return 0
+        
+    penalty = 0
+    for duty in ['D', 'E', 'N', 'OFF']:
+        counts = {'A': 0, 'B': 0, 'C': 0}
+        for i in range(num_nurses):
+            if col[i] == duty:
+                g = nurse_groups[i] if nurse_groups[i] in ['A', 'B', 'C'] else 'A'
+                counts[g] += 1
+        tot = sum(counts.values())
+        
+        if tot == 3:
+            penalty += (abs(counts['A'] - 1) + abs(counts['B'] - 1) + abs(counts['C'] - 1)) * 50
+        elif tot == 4:
+            penalty += (max(0, counts['A'] - 2) + max(0, 1 - counts['A'])) * 50
+            penalty += abs(counts['B'] - 1) * 50
+            penalty += (max(0, counts['C'] - 2) + max(0, 1 - counts['C'])) * 50
+        elif tot == 6:
+            penalty += (abs(counts['A'] - 2) + abs(counts['B'] - 2) + abs(counts['C'] - 2)) * 50
+        elif tot == 7:
+            penalty += (max(0, counts['A'] - 3) + max(0, 2 - counts['A'])) * 50
+            penalty += abs(counts['B'] - 2) * 50
+            penalty += (max(0, counts['C'] - 3) + max(0, 2 - counts['C'])) * 50
+        elif tot == 8:
+            penalty += (abs(counts['A'] - 3) + abs(counts['B'] - 2) + abs(counts['C'] - 3)) * 50
+            
+    return penalty
+
+# 하이브리드 고정형 초기 스케줄 생성 함수
+def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts):
+    sched = np.empty((num_nurses, num_days), dtype=object)
+    for d in range(num_days):
+        nD = requirements['D'][d]
+        nE = requirements['E'][d]
+        nN = requirements['N'][d]
+        nDE = requirements['DE'][d] if 'DE' in requirements else 0
+        
+        pD = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'D')
+        pE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'E')
+        pN = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'N')
+        pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
+        pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
+        
+        rem_D = max(0, nD - pD - pEDU)
+        rem_E = max(0, nE - pE)
+        rem_N = max(0, nN - pN)
+        rem_DE = max(0, nDE - pDE)
+        
+        num_unfixed = sum(1 for i in range(num_nurses) if not is_fixed[i, d])
+        rem_OFF = max(0, num_unfixed - rem_D - rem_E - rem_N - rem_DE)
+        
+        pool = ['D'] * rem_D + ['E'] * rem_E + ['N'] * rem_N + ['DE'] * rem_DE + ['OFF'] * rem_OFF
+        random.shuffle(pool)
+        
+        pool_idx = 0
+        for i in range(num_nurses):
+            if is_fixed[i, d]:
+                sched[i, d] = fixed_shifts[i, d]
+            else:
+                sched[i, d] = pool[pool_idx]
+                pool_idx += 1
+    return sched
+
+# 구글 스프레드시트 데이터베이스로부터 실시간 신청 오프 내역 동기화 함수
+def fetch_google_sheet_data():
+    try:
+        response = requests.get(GAS_URL)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        pass
+    return []
+
+# ⚙️ 수간호사 신규 업로드 시 세션 상태 등록 및 서버 디스크 영구 백업 기능
+if uploaded_schedule:
+    try:
+        if uploaded_schedule.name.endswith('xlsx'):
+            raw_df = pd.read_excel(uploaded_schedule)
+        else:
+            raw_df = pd.read_csv(uploaded_schedule, encoding='utf-8-sig')
+        schedule_df = load_and_align_headers(raw_df)
+        
+        # 1. 서버 하드디스크에 영구 고정 저장 (절대 유실되지 않음!)
+        schedule_df.to_excel("template_shared.xlsx", index=False)
+        st.session_state["schedule_df_state"] = schedule_df
+        
+        # 2. 구글 스프레드시트에 최초 업로드된 간호사 명단을 가입 처리
+        sheet_data = fetch_google_sheet_data()
+        existing_names = [str(item['name']).strip() for item in sheet_data] if sheet_data else []
+        
+        for idx, row in schedule_df.iterrows():
+            nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+            if nurse_id is not None and str(nurse_id) not in existing_names:
+                requests.post(GAS_URL, json={"name": str(nurse_id), "wanted_off": "-"})
+        st.sidebar.success("✅ 새로운 템플릿이 서버와 데이터베이스에 성공적으로 등록되었습니다!")
+    except Exception as e:
+        st.sidebar.error(f"템플릿 파일 읽기 에러: {e}")
+
+# 5. 메인 인터페이스부
+# (이제 schedule_df_state가 None이 아니므로 모든 동료들이 자유롭게 접속해 화면을 정상적으로 볼 수 있습니다!)
+if st.session_state["schedule_df_state"] is not None:
+    menu = st.radio("👉 사용 유형을 선택하세요", ["🙋‍♀️ [간호사용] 원티드 오프 신청", "⚙️ [수간호사용] 관리자 제어판"], horizontal=True)
+    
+    # ----------------- [뷰 1] 간호사용 원티드 오프 신청 포털 -----------------
+    if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
+        st.markdown("---")
+        st.write("### 📅 원하는 휴무일 직접 신청")
+        st.info("💡 원하는 휴가 날짜를 지정하고 신청을 완료하면, 구글 스프레드시트에 신청 시간과 함께 실시간 저장됩니다.")
+        
+        # 서버 디스크에서 템플릿 읽기
+        df_temp = st.session_state["schedule_df_state"].copy()
+        sheet_data = fetch_google_sheet_data()
+        
+        # 간호사 목록을 서버 엑셀에서 원천 추출하므로 절대 비어있지 않습니다!
+        nurse_names = []
+        for idx, row in df_temp.iterrows():
+            nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+            if nurse_id is not None:
+                nurse_names.append(nurse_id)
+        
+        # 구글 시트에 실시간 쌓인 오프 갯수 계산
         day_request_counts = {}
         for item in sheet_data:
             wanted = item['wanted_off']
@@ -52,15 +392,12 @@ if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
                         d = int(match.group(1))
                         day_request_counts[d] = day_request_counts.get(d, 0) + 1
                         
-        # 하루 최대 허용치 설정 (임시 고정 2명, 관리자 탭에서 가변 조정 가능)
-        limit_daily_off = 2
-        
         st.write("#### 📢 8월 일자별 오프 신청 현황 및 마감 잔여석")
         cols = st.columns(10)
         for day in range(1, 32):
             col_idx = (day - 1) % 10
             count = day_request_counts.get(day, 0)
-            rem = max(0, limit_daily_off - count)
+            rem = max(0, limit_daily_off_request - count)
             with cols[col_idx]:
                 if rem == 0:
                     st.markdown(f"**{day}일**\n\n🔴 **마감**")
@@ -71,7 +408,7 @@ if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
         
         col1, col2 = st.columns(2)
         with col1:
-            selected_nurse = st.selectbox("1. 본인의 이름을 선택하세요", nurse_names)
+            selected_nurse = st.selectbox("1. 본인의 이름을 선택하세요", nurse_names, format_func=lambda x: f"{x}번 간호사" if str(x).replace('.0', '').isdigit() else f"{x} 간호사")
         with col2:
             selected_offs = st.multiselect("2. 희망 휴무일을 복수 선택하세요 (마감된 날짜 제외)", list(range(1, 32)))
             
@@ -79,9 +416,9 @@ if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
             if len(selected_offs) > 0:
                 closed_days = []
                 for d in selected_offs:
-                    # 타인 신청 수 집계
-                    other_count = sum(1 for item in sheet_data if d in [int(re.search(r'^\s*(\d+)', x.strip()).group(1)) for x in str(item['wanted_off']).split(',') if re.search(r'^\s*(\d+)', x.strip())] and item['name'] != selected_nurse)
-                    if other_count >= limit_daily_off:
+                    # 타인 신청 인원수 구글 시트에서 즉시 계산
+                    other_count = sum(1 for item in sheet_data if d in [int(re.search(r'^\s*(\d+)', x.strip()).group(1)) for x in str(item['wanted_off']).split(',') if re.search(r'^\s*(\d+)', x.strip())] and str(item['name']).strip() != str(selected_nurse))
+                    if other_count >= limit_daily_off_request:
                         closed_days.append(d)
                         
                 if len(closed_days) > 0:
@@ -93,7 +430,7 @@ if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
                     
                     try:
                         # 구글 스프레드시트에 실시간 전송 저장!
-                        payload = {"name": selected_nurse, "wanted_off": offs_formatted_str}
+                        payload = {"name": str(selected_nurse), "wanted_off": offs_formatted_str}
                         res = requests.post(GAS_URL, json=payload)
                         if res.status_code == 200:
                             st.success(f"🎉 신청 성공! {selected_nurse} 간호사님 오프 수집 완료: [{offs_formatted_str}]")
@@ -103,89 +440,18 @@ if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
                         st.error(f"구글 서버 전송 중 오류 발생: {e}")
             else:
                 st.warning("날짜를 선택해 주세요.")
-    else:
-        st.warning("⚠️ 데이터베이스에 등록된 간호사가 없습니다. 먼저 [수간호사용] 관리자 제어판에서 '초기 근무표 템플릿'을 업로드해 주세요.")
 
-# ----------------- [뷰 2] 수간호사용 비밀번호 관리자 제어판 -----------------
-elif menu == "⚙️ [수간호사용] 관리자 제어판":
-    st.markdown("---")
-    st.sidebar.markdown("### 🔐 관리자 인증")
-    
-    # ⭐ 관리자 비밀번호 세팅 (유출 방지용)
-    admin_password = st.sidebar.text_input("수간호사 비밀번호를 입력하세요", type="password")
-    
-    # 비밀번호가 맞을 때만 화면 렌더링 (보안 장치)
-    if admin_password == "1234": # 비밀번호 원하시는 대로 수정 가능!
-        st.sidebar.success("🔑 관리자 인증 성공!")
-        st.write("### 🛠️ 수간호사 근무표 마스터 통제 제어판")
+    # ----------------- [뷰 2] 수간호사용 비밀번호 관리자 제어판 -----------------
+    elif menu == "⚙️ [수간호사용] 관리자 제어판":
+        st.markdown("---")
+        st.sidebar.markdown("### 🔐 관리자 인증")
+        admin_password = st.sidebar.text_input("수간호사 비밀번호를 입력하세요", type="password")
         
-        # 기존 작성 규칙 및 파일들
-        uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
-        uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
-        uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
-        
-        st.sidebar.markdown("---")
-        st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
-        rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True)
-        rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True)
-        rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True)
-        rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True)
-
-        limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, 5)
-        limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, 6)
-        limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, 3)
-        limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 4, 2)
-
-        # [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
-        if uploaded_schedule:
-            file_key = f"{uploaded_schedule.name}_{uploaded_schedule.size}"
-            if "last_file_key" not in st.session_state or st.session_state["last_file_key"] != file_key:
-                st.session_state["last_file_key"] = file_key
-                st.session_state["schedule_df_state"] = None  
-                st.session_state["optimized_result"] = None   
-
-        # [보정 함수] 헤더 밀림 방지 보정
-        def load_and_align_headers(df):
-            if '그룹' in df.columns:
-                df.columns = [str(col).strip().replace('.0', '') for col in df.columns]
-                return df
-            for idx in range(min(5, len(df))):
-                row_vals = [str(x).strip() for x in df.iloc[idx].values]
-                if '그룹' in row_vals or '그룹 ' in row_vals:
-                    new_cols = []
-                    for col_val in df.iloc[idx].values:
-                        val = str(col_val).strip() if pd.notna(col_val) else ""
-                        if val.endswith('.0'):
-                            val = val[:-2]
-                        new_cols.append(val)
-                    df.columns = new_cols
-                    df = df.iloc[idx+1:].reset_index(drop=True)
-                    break
-            return df
-
-        if uploaded_schedule and st.session_state["schedule_df_state"] is None:
-            try:
-                if uploaded_schedule.name.endswith('xlsx'):
-                    raw_df = pd.read_excel(uploaded_schedule)
-                else:
-                    raw_df = pd.read_csv(uploaded_schedule, encoding='utf-8-sig')
-                schedule_df = load_and_align_headers(raw_df)
-                
-                # ⭐ 최초 업로드 시 구글 스프레드시트에 간호사 이름을 자동 기입하여 동기화
-                st.session_state["schedule_df_state"] = schedule_df
-                sheet_data = fetch_google_sheet_data()
-                existing_names = [item['name'] for item in sheet_data]
-                
-                for idx, row in schedule_df.iterrows():
-                    nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-                    if nurse_id is not None and str(nurse_id) not in existing_names:
-                        requests.post(GAS_URL, json={"name": str(nurse_id), "wanted_off": "-"})
-                st.success("간호사 목록이 데이터베이스에 정상적으로 세팅되었습니다!")
-            except Exception as e:
-                st.error(f"템플릿 파일 읽기 에러: {e}")
-
-        # 수간호사용 탭 분할
-        if st.session_state["schedule_df_state"] is not None:
+        if admin_password == "1234":
+            st.sidebar.success("🔑 관리자 인증 성공!")
+            st.write("### 🛠️ 수간호사 근무표 마스터 통제 제어판")
+            
+            # 수간호사용 실시간 오프 신청 모니터링 및 작성 제어
             col_tab1, col_tab2 = st.tabs(["📋 실시간 오프 신청 현황판", "📅 AI 최종 근무표 생성"])
             
             with col_tab1:
@@ -197,6 +463,7 @@ elif menu == "⚙️ [수간호사용] 관리자 제어판":
                 sheet_data = fetch_google_sheet_data()
                 df_temp = st.session_state["schedule_df_state"].copy()
                 
+                # 구글 시트 데이터를 로컬 뷰에 실시간 덮어쓰기
                 for item in sheet_data:
                     nurse_name = item['name']
                     wanted_val = item['wanted_off']
@@ -221,16 +488,13 @@ elif menu == "⚙️ [수간호사용] 관리자 제어판":
                             df_clean = df_clean.replace(r'^\s*$', np.nan, regex=True)
                             df_clean['그룹'] = df_clean['그룹'].ffill()
                             
-                            # (이전 달 로드 및 연동 연산, 초기화, 벌점 최적화 루프 동일 구동)
-                            # ... 생략없이 아래 함수들과 연계 구동됩니다 ...
+                            # 이전 달 로드
                             prev_df = None
                             if uploaded_prev_month is not None:
                                 try:
                                     prev_df = pd.read_excel(uploaded_prev_month) if uploaded_prev_month.name.endswith('xlsx') else pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
                                 except: pass
                             
-                            # (간호사 정보, 이전달 연동, 인원수 계산, 초기화 및 Simulated Annealing 동일 수행)
-                            # ... 기존 완성된 AI 엔진과 동일 구동 ...
                             # 1. 간호사 추출 및 야간전담 분류 + 이전달 근무 기록 매핑
                             nurses = []
                             is_night_keepers = []
@@ -244,7 +508,7 @@ elif menu == "⚙️ [수간호사용] 관리자 제어판":
                                 if nurse_id is not None:
                                     wanted = row['원티드 오프']
                                     wanted_days = []
-                                    # 정규식 숫자일자 파싱
+                                    # 정규식 일자 파싱
                                     if pd.notna(wanted) and str(wanted).strip() != '-':
                                         for x in str(wanted).split(','):
                                             match = re.search(r'^\s*(\d+)', x.strip())
@@ -265,7 +529,7 @@ elif menu == "⚙️ [수간호사용] 관리자 제어판":
                                     is_night_keepers.append(is_keeper)
                                     nurse_histories.append(history)
                                     
-                            # 요구량 파싱
+                            # 요구수 파싱
                             requirements = {}
                             default_values = {
                                 'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
@@ -415,6 +679,10 @@ elif menu == "⚙️ [수간호사용] 관리자 제어판":
                             file_name="최종_근무표_야간전담_이전달연동.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
-    else:
-        st.warning("⚠️ 관리자 비밀번호가 틀렸거나 입력되지 않았습니다.")
-        st.info("💡 사이드바의 자물쇠 입력창에 올바른 비밀번호를 입력해 주시면 관리 제어판이 열립니다.")
+        else:
+            st.warning("⚠️ 관리자 비밀번호가 틀렸거나 입력되지 않았습니다.")
+            st.info("💡 사이드바의 자물쇠 입력창에 올바른 비밀번호를 입력해 주시면 관리 제어판이 열립니다.")
+else:
+    # ⚠️ 최초 등록 전에는 관리자 제어판의 업로드 창만 가이드로 띄워둡니다.
+    st.warning("📊 아직 등록된 템플릿(간호사 목록)이 없습니다.")
+    st.info("💡 먼저 **[⚙️ 관리자 제어판]** 탭을 누르시고, 비밀번호 **`1234`**를 입력하신 후 사이드바 메뉴에 '2. 초기 근무표 템플릿 업로드' 파일을 최소 한 번 이상 올려주세요! 등록되는 즉시 모든 사용자에게 오프 신청 포털이 자동으로 개설됩니다.")
