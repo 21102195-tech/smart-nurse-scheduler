@@ -10,6 +10,7 @@ import re
 st.set_page_config(page_title="간호사 스마트 3교대 스케줄러", layout="wide")
 
 st.title("🏥 3교대 간호사 스마트 근무표 작성 & 신청 시스템")
+st.subheader("이전 달 근무 스케줄과의 유연한 연속 연동(말일 나이트 휴무 보장 등) 기능이 탑재되었습니다.")
 
 # 2. 세션 메모리 초기화
 if "schedule_df_state" not in st.session_state:
@@ -17,10 +18,11 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# 사이드바 - 관리자 메뉴
+# 사이드바 - 관리자 메뉴 (이전 달 근무표 추가 선택창 탑재)
 st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
 uploaded_rules = st.sidebar.file_uploader("1. 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
 uploaded_schedule = st.sidebar.file_uploader("2. 템플릿 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
 
 # [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
 if uploaded_schedule:
@@ -30,24 +32,19 @@ if uploaded_schedule:
         st.session_state["schedule_df_state"] = None  
         st.session_state["optimized_result"] = None   
 
-# ⭐ [지능형 가변 이름 및 야간전담 판정 파서]
-# 숫자 번호(1, 2)는 물론 실제 한글 성함(홍길동, 김미영)도 누락 없이 100% 정상 파싱합니다.
+# [지능형 가변 이름 및 야간전담 판정 파서]
 def parse_nurse_row(name, group):
     name_str = str(name).strip() if pd.notna(name) else ""
     group_str = str(group).strip() if pd.notna(group) else ""
     
-    # 공백이나 nan, 테이블 헤더 성격의 문자열은 간호사에서 제외(필터링)
     if not name_str or name_str.lower() in ['nan', '이름', '그룹', 'none', 'null', '', '토', '일', '월', '화', '수', '목', '금', '요일']:
         return None, False
         
-    # '듀티별 인원수' 행 배제
     if "듀티별" in group_str or "인원수" in group_str:
         return None, False
         
-    # 야간전담 여부 검사
     is_keeper = "야간전담" in name_str or "야간전담" in group_str
     
-    # float 형태 포맷 클렌징 (예: "1.0" -> "1")
     clean_name = name_str
     if clean_name.endswith('.0'):
         clean_name = clean_name[:-2]
@@ -74,6 +71,38 @@ def load_and_align_headers(df):
             break
     return df
 
+# [이전 달 정보 추출기] 업로드된 이전 달 근무표에서 해당 간호사의 마지막 7일간 근무 내역 추출
+def extract_nurse_history(prev_df, nurse_name):
+    try:
+        df_aligned = load_and_align_headers(prev_df)
+        day_cols = []
+        for col in df_aligned.columns:
+            col_str = str(col).strip()
+            if col_str.isdigit():
+                day_cols.append(int(col_str))
+                
+        day_cols.sort()
+        last_7_days = day_cols[-7:] # 마지막 7일 간의 일자 컬럼 추출
+        
+        for idx, row in df_aligned.iterrows():
+            name = row['이름']
+            group = row['그룹'] if '그룹' in df_aligned.columns else ""
+            nurse_id, _ = parse_nurse_row(name, group)
+            if nurse_id is not None and str(nurse_id) == str(nurse_name):
+                shifts = []
+                for d in last_7_days:
+                    col_name = str(d) if str(d) in df_aligned.columns else (int(d) if int(d) in df_aligned.columns else d)
+                    val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
+                    if val in ['D', '데이', 'DAY']: val = 'D'
+                    elif val in ['E', '이브', '이브닝', 'EVENING']: val = 'E'
+                    elif val in ['N', '나이트', 'NIGHT']: val = 'N'
+                    else: val = 'OFF'
+                    shifts.append(val)
+                return shifts
+    except Exception as e:
+        pass
+    return ['OFF'] * 7 # 매칭되지 않는 경우 기본 7일 휴무 처리
+
 if uploaded_schedule and st.session_state["schedule_df_state"] is None:
     try:
         if uploaded_schedule.name.endswith('xlsx'):
@@ -84,82 +113,94 @@ if uploaded_schedule and st.session_state["schedule_df_state"] is None:
     except Exception as e:
         st.error(f"템플릿 파일을 읽는 중 오류가 발생했습니다: {e}")
 
-# 벌점 계산 수식 정의
-def get_nurse_penalty(row, i, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keeper):
+# ⭐ [이전 달 연동형] 벌점 계산 수식 정의
+def get_nurse_penalty(row_current, i, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keeper, history):
+    # 전달 7일 + 이번달 31일 = 총 38일의 연속된 스레드로 변환하여 연동 계산합니다!
+    row = list(history) + list(row_current)
+    num_total = len(row)
+    history_len = len(history)
+    
     penalty = 0
-    # 규칙 1: 원티드 오프 준수
-    for d in range(num_days):
-        if (d+1) in nurse_wanted_off[i] and row[d] != 'OFF':
+    # 규칙 1: 원티드 오프 준수 (이번달 영역만 감지)
+    for d in range(history_len, num_total):
+        current_day = d - history_len + 1
+        if current_day in nurse_wanted_off and row[d] != 'OFF':
             penalty += 1000000
             
+    # [야간전담 전용 규칙 분기 처리]
     if is_night_keeper:
-        # 야간전담 규칙 A: D, E 근무 절대 배정 금지
-        for d in range(num_days):
+        for d in range(history_len, num_total):
             if row[d] in ['D', 'E']:
                 penalty += 1000000
-        # 야간전담 규칙 B: 한 달 총 밤근무(N) 정확히 15개
-        total_N = sum(1 for x in row if x == 'N')
+        total_N = sum(1 for x in row[history_len:] if x == 'N')
         if total_N != 15:
             penalty += abs(total_N - 15) * 500000
     else:
-        # 규칙 2: 한 달 밤근무(N) 5~6개 균등화
-        total_N = sum(1 for x in row if x == 'N')
+        # 규칙 2: 한 달 밤근무(N) 5~6개 균등화 (이번달 영역만 계산)
+        total_N = sum(1 for x in row[history_len:] if x == 'N')
         if total_N < 5 or total_N > 6:
             penalty += (abs(total_N - 5.5) - 0.5) * 500000
             
         # 규칙 3: 한 달 총 휴무(OFF) 개수 균등화 (12~13일)
-        total_OFF = sum(1 for x in row if x == 'OFF')
+        total_OFF = sum(1 for x in row[history_len:] if x == 'OFF')
         if total_OFF < 12 or total_OFF > 13:
             penalty += (abs(total_OFF - 12.5) - 0.5) * 400000
         
     consec_work = 0
     consec_N = 0
-    for d in range(num_days):
+    for d in range(num_total):
         shift = row[d]
         if shift != 'OFF':
             consec_work += 1
-            if consec_work >= 6:
+            # 연속 6일 근무 감지 (이번달 날짜가 최소 하루 이상 엮여 있는 경우에만 벌점 부과)
+            if consec_work >= 6 and d >= history_len:
                 penalty += (consec_work - 5) * 500000
         else:
             # 규칙 4: 5일 연속 근무 후 2 OFF 연속 보장
             if consec_work == 5:
-                if d + 1 < num_days:
-                    if row[d+1] != 'OFF':
+                if d + 1 < num_total:
+                    if row[d+1] != 'OFF' and (d+1) >= history_len:
                         penalty += 300000
             consec_work = 0
             
         if shift == 'N':
             consec_N += 1
-            if consec_N > 3: 
+            if consec_N > 3 and d >= history_len:  # 연속 밤근무 3일 제한
                 penalty += (consec_N - 3) * 500000
         else:
             consec_N = 0
             
-        if d < num_days - 1:
+        # 단일 일자 전이 규칙 (E->D, N->D, N->E 방지) - 이번달 영역에 겹칠 때만 감지
+        if d < num_total - 1:
             next_shift = row[d+1]
-            if shift == 'E' and next_shift == 'D':
-                penalty += 500000
-            if shift == 'N' and next_shift in ['D', 'E']:
-                penalty += 500000
+            if (d+1) >= history_len:
+                if shift == 'E' and next_shift == 'D':
+                    penalty += 500000
+                if shift == 'N' and next_shift in ['D', 'E']:
+                    penalty += 500000
                 
+        # N 근무 이후 최소 2일 연속 OFF 보장
         if shift == 'N':
-            if d < num_days - 1:
+            if d < num_total - 1:
                 if row[d+1] != 'N':
-                    if row[d+1] != 'OFF':
+                    if row[d+1] != 'OFF' and (d+1) >= history_len:
                         penalty += 500000
-                    if d < num_days - 2:
-                        if row[d+2] != 'OFF':
+                    if d < num_total - 2:
+                        if row[d+2] != 'OFF' and (d+2) >= history_len:
                             penalty += 500000
                             
-        if d <= num_days - 5:
+        # 규칙 6: 5일 연속 금지 패턴 방지
+        if d <= num_total - 5:
             pat = list(row[d:d+5])
-            if pat in forbidden_5_patterns:
-                penalty += 500000
+            if (d+4) >= history_len:
+                if pat in forbidden_5_patterns:
+                    penalty += 500000
                 
-    for d in range(num_days):
+    # 단독 나이트 방지
+    for d in range(history_len, num_total):
         if row[d] == 'N':
             prev_is_N = (d > 0 and row[d-1] == 'N')
-            next_is_N = (d < num_days - 1 and row[d+1] == 'N')
+            next_is_N = (d < num_total - 1 and row[d+1] == 'N')
             if not prev_is_N and not next_is_N:
                 penalty += 300000
                 
@@ -244,7 +285,6 @@ if st.session_state["schedule_df_state"] is not None:
                 
         col1, col2 = st.columns(2)
         with col1:
-            # ⭐ 간호사 이름이 숫자인 경우와 문자 한글인 경우를 분기해 깔끔하게 출력
             selected_nurse = st.selectbox(
                 "1. 본인의 이름을 선택하세요", 
                 nurse_names, 
@@ -282,15 +322,27 @@ if st.session_state["schedule_df_state"] is not None:
             if uploaded_rules is None:
                 st.error("에러: 규칙 파일을 먼저 사이드바에 업로드해 주세요.")
             else:
-                with st.spinner("야간전담 대상자 분류 및 잠금 마스크 활성화 중..."):
+                with st.spinner("야간전담 분류 및 이전 달 근태 연동 연산 중..."):
                     df_clean = st.session_state["schedule_df_state"].copy()
                     
                     df_clean = df_clean.replace(r'^\s*$', np.nan, regex=True)
                     df_clean['그룹'] = df_clean['그룹'].ffill()
                     
-                    # 1. 간호사 추출 및 야간전담 분류
+                    # 1. 이전 달 근무 데이터 로드 처리
+                    prev_df = None
+                    if uploaded_prev_month is not None:
+                        try:
+                            if uploaded_prev_month.name.endswith('xlsx'):
+                                prev_df = pd.read_excel(uploaded_prev_month)
+                            else:
+                                prev_df = pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
+                        except Exception as e:
+                            st.warning(f"경고: 이전 달 근무표를 파싱하는 과정에서 오류가 발생했습니다. 이전 달 근무 연동 없이 연산을 시작합니다. (오류내용: {e})")
+                    
+                    # 2. 간호사 추출 및 야간전담 분류 + 이전달 근무 기록 매핑
                     nurses = []
                     is_night_keepers = []
+                    nurse_histories = [] # 이전 달 마지막 7일간의 근무 내역 저장소
                     
                     for idx, row in df_clean.iterrows():
                         name = row['이름']
@@ -303,6 +355,11 @@ if st.session_state["schedule_df_state"] is not None:
                             if pd.notna(wanted) and str(wanted).strip() != '-':
                                 wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
                             
+                            # ⭐ [이전 달 연동] 업로드된 이전 달 엑셀에서 해당 간호사의 마지막 7일간 근무 추출
+                            history = ['OFF'] * 7
+                            if prev_df is not None:
+                                history = extract_nurse_history(prev_df, nurse_id)
+                                
                             nurses.append({
                                 'id': nurse_id,
                                 'group': row['그룹'],
@@ -311,8 +368,9 @@ if st.session_state["schedule_df_state"] is not None:
                                 'is_keeper': is_keeper
                             })
                             is_night_keepers.append(is_keeper)
+                            nurse_histories.append(history)
                             
-                    # 2. 요구 인원수 파싱
+                    # 3. 요구 인원수 파싱
                     requirements = {}
                     default_values = {
                         'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
@@ -373,7 +431,7 @@ if st.session_state["schedule_df_state"] is not None:
                         ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N']
                     ]
                     
-                    # 3. 사용자가 수동으로 채워둔 고정 근무의 위치(Lock Mask) 식별 및 한글 예외처리
+                    # 4. 사용자가 수동으로 채워둔 고정 근무의 위치(Lock Mask) 식별 및 한글 예외처리
                     is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                     fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
                     
@@ -394,10 +452,11 @@ if st.session_state["schedule_df_state"] is not None:
                                 is_fixed[i, d] = True
                                 fixed_shifts[i, d] = val
                     
-                    # 4. 하이브리드 고정 스케줄 초기화
+                    # 5. 하이브리드 고정 스케줄 초기화
                     sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts)
                     
-                    row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keepers[i]) for i in range(num_nurses)]
+                    # ⭐ 벌점 계산기 함수 호출 시 간호사들의 'history (이전 달 마지막 주 근무)'를 매칭하여 넘겨줍니다.
+                    row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i]) for i in range(num_nurses)]
                     col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups) for d in range(num_days)]
                     total_penalty = sum(row_penalties) + sum(col_penalties)
                     
@@ -408,7 +467,7 @@ if st.session_state["schedule_df_state"] is not None:
                     temp = 25.0
                     cooling_rate = 0.9999
                     
-                    # 5. 최적화 루프
+                    # 6. 최적화 루프
                     for step in range(max_iter):
                         d = random.randint(0, num_days - 1)
                         i1 = random.randint(0, num_nurses - 1)
@@ -428,8 +487,9 @@ if st.session_state["schedule_df_state"] is not None:
                         
                         sched[i1, d], sched[i2, d] = old_shift_i2, old_shift_i1
                         
-                        new_row_pen_i1 = get_nurse_penalty(sched[i1], i1, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keepers[i1])
-                        new_row_pen_i2 = get_nurse_penalty(sched[i2], i2, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keepers[i2])
+                        # ⭐ 변경 교환 시에도 간호사들의 histories를 인자로 함께 넘겨줍니다.
+                        new_row_pen_i1 = get_nurse_penalty(sched[i1], i1, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keepers[i1], nurse_histories[i1])
+                        new_row_pen_i2 = get_nurse_penalty(sched[i2], i2, nurse_wanted_off, num_days, forbidden_5_patterns, is_night_keepers[i2], nurse_histories[i2])
                         new_col_pen = get_day_penalty(sched[:, d], num_nurses, nurse_groups)
                         
                         new_total_penalty = (total_penalty 
@@ -482,7 +542,7 @@ if st.session_state["schedule_df_state"] is not None:
                 st.download_button(
                     label="📥 최종 근무표 Excel 다운로드",
                     data=towrite,
-                    file_name="최종_근무표_야간전담반영.xlsx",
+                    file_name="최종_근무표_야간전담_이전달연동.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 else:
