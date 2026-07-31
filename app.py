@@ -5,18 +5,21 @@ import random
 import copy
 import io
 import re
+from datetime import datetime
 
 # 1. 웹페이지 기본 설정
 st.set_page_config(page_title="간호사 스마트 3교대 스케줄러", layout="wide")
 
 st.title("🏥 3교대 간호사 스마트 근무표 작성 & 신청 시스템")
-st.subheader("고정 근무(D/E/N/DE/교육) 잠금 및 교육 근무의 D 근무 치환 규칙이 완벽히 반영되었습니다.")
+st.subheader("실시간 일별 선착순 오프 마감 및 신청 일시 기록 기능이 완벽하게 반영되었습니다.")
 
-# 2. 세션 메모리 초기화
+# 2. 세션 메모리 초기화 (새로고침 시 데이터 및 신청 시간 로그 보존용)
 if "schedule_df_state" not in st.session_state:
-    st.session_state["schedule_df_state"] = None
+    st.session_state["schedule_df_state"] = None  # 취합 중인 데이터프레임
 if "optimized_result" not in st.session_state:
-    st.session_state["optimized_result"] = None
+    st.session_state["optimized_result"] = None  # 최종 생성된 근무표
+if "wanted_off_log" not in st.session_state:
+    st.session_state["wanted_off_log"] = {}  # 간호사별 상세 신청 로그: { "간호사명": { day: "MM/DD HH:MM" } }
 
 # 3. 사이드바 - 관리자 메뉴 및 업로드 버튼
 st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
@@ -29,26 +32,21 @@ st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
 
 # 1. On/Off 토글 규칙들
-rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True, help="체크 시 5일 일하면 무조건 이틀 쉽니다.")
-rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True, help="체크 시 밤근무는 무조건 연속 2~3일로 묶어서 배정됩니다.")
-rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True, help="체크 시 특정 경력의 간호사가 한 듀티에 쏠리지 않도록 분산합니다.")
-rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True, help="체크 시 야간 근무 종료 후 최소 2일 연속 OFF를 필수로 보장합니다.")
+rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True)
+rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True)
+rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True)
+rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True)
 
 # 2. 원하는 일수 슬라이더 조절 기능
-limit_max_consec_work = st.sidebar.slider(
-    "최대 연속 근무 일수 제한", 
-    min_value=0, max_value=5, value=5, 
-    help="연속 일할 수 있는 한도를 지정합니다. 0일 지정 시 연속 근무 일수 제한 규칙이 꺼집니다. (0일 ~ 최대 5일)"
-)
-limit_max_monthly_night = st.sidebar.slider(
-    "월간 인당 최대 나이트(N) 개수", 
-    min_value=0, max_value=7, value=6, 
-    help="교대 간호사 기준 한 달 최대 밤근무 한도를 설정합니다. (0개 ~ 최대 7개)"
-)
-limit_max_consec_night = st.sidebar.slider(
-    "최대 연속 나이트(N) 제한", 
-    min_value=2, max_value=3, value=3, 
-    help="연속으로 밤근무를 서는 최대 일수를 제어합니다. (최소 2일 ~ 최대 3일)"
+limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, 5)
+limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, 6)
+limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, 3)
+
+# ⭐ [실시간 마감] 하루 최대 오프 신청 한도 설정 슬라이더
+limit_daily_off_request = st.sidebar.slider(
+    "📢 하루 최대 오프 신청 허용 인원", 
+    min_value=1, max_value=4, value=2, 
+    help="하루에 최대로 오프를 신청할 수 있는 간호사 인원수입니다. 초과 시 마감 처리됩니다. (권장: 2명)"
 )
 
 # [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
@@ -58,6 +56,7 @@ if uploaded_schedule:
         st.session_state["last_file_key"] = file_key
         st.session_state["schedule_df_state"] = None  
         st.session_state["optimized_result"] = None   
+        st.session_state["wanted_off_log"] = {}
 
 # [지능형 가변 이름 및 야간전담 판정 파서]
 def parse_nurse_row(name, group):
@@ -134,7 +133,6 @@ def extract_nurse_history(prev_df, nurse_name):
 
 # 벌점 계산 수식 정의
 def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row):
-    # ⭐ [교육 근무의 D 치환]: 연속 근무 및 교대 금지 규칙을 위해 교육 근무를 D로 치환한 가상 근무 행을 생성합니다.
     row_norm = []
     for x in (list(history) + list(row_current)):
         if x == '교육':
@@ -204,7 +202,6 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
         else:
             consec_N = 0
             
-        # 교대 제한 (E->D, E->DE, N->D, N->E, N->DE, N->교육 등 자동 제어)
         if d < num_total - 1:
             next_shift = row_norm[d+1]
             if (d+1) >= history_len:
@@ -271,7 +268,7 @@ def get_day_penalty(col, num_nurses, nurse_groups):
             
     return penalty
 
-# ⭐ [DE 및 교육 지원 강화] 하이브리드 고정형 초기 스케줄 생성 함수
+# 하이브리드 고정형 초기 스케줄 생성 함수
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts):
     sched = np.empty((num_nurses, num_days), dtype=object)
     for d in range(num_days):
@@ -280,14 +277,12 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
         nN = requirements['N'][d]
         nDE = requirements['DE'][d] if 'DE' in requirements else 0
         
-        # 고정값 합산
         pD = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'D')
         pE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'E')
         pN = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'N')
         pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
         pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
         
-        # 교육(EDU)은 D 근무 인력으로 인정하여 D의 잔여 배치량(rem_D) 계산 시 차감 보정합니다!
         rem_D = max(0, nD - pD - pEDU)
         rem_E = max(0, nE - pE)
         rem_N = max(0, nN - pN)
@@ -327,9 +322,10 @@ if st.session_state["schedule_df_state"] is not None:
         "📅 [관리자용] AI 최종 근무표 생성"
     ])
     
-    # ---------------- 탭 1: 자가 신청 포털 ----------------
+    # ---------------- 탭 1: 간호사 자가 신청 포털 (선착순 마감 기능 탑재!) ----------------
     with tab_apply:
         st.write("### 📅 원하는 휴무일 직접 신청")
+        st.info("💡 선착순으로 오프를 신청할 수 있으며, 일별 최대 허용 한도를 초과하면 마감됩니다.")
         df_temp = st.session_state["schedule_df_state"]
         
         nurse_names = []
@@ -338,6 +334,28 @@ if st.session_state["schedule_df_state"] is not None:
             if nurse_id is not None:
                 nurse_names.append(nurse_id)
                 
+        # 1. 일별 실시간 신청 현황 요약 테이블 작성
+        day_request_counts = {}
+        for nurse, days_dict in st.session_state["wanted_off_log"].items():
+            for d in days_dict.keys():
+                day_request_counts[d] = day_request_counts.get(d, 0) + 1
+                
+        # 간호사들이 직관적으로 볼 수 있게 달력 형태의 신청 현황판 렌더링
+        st.write("#### 📢 8월 일자별 오프 신청 현황 및 마감 잔여석")
+        cols = st.columns(10) # 10개 열로 나누어 일수 나열
+        for day in range(1, 32):
+            col_idx = (day - 1) % 10
+            count = day_request_counts.get(day, 0)
+            rem = max(0, limit_daily_off_request - count)
+            
+            with cols[col_idx]:
+                if rem == 0:
+                    st.markdown(f"**{day}일**\n\n🔴 **마감**")
+                else:
+                    st.markdown(f"**{day}일**\n\n🟢 {rem}석 남음")
+        
+        st.markdown("---")
+        
         col1, col2 = st.columns(2)
         with col1:
             selected_nurse = st.selectbox(
@@ -346,32 +364,71 @@ if st.session_state["schedule_df_state"] is not None:
                 format_func=lambda x: f"{x}번 간호사" if str(x).replace('.0', '').isdigit() else f"{x} 간호사"
             )
         with col2:
-            selected_offs = st.multiselect("2. 희망 휴무일을 복수 선택하세요", list(range(1, 32)))
+            selected_offs = st.multiselect("2. 희망 휴무일을 선택하세요 (마감되지 않은 날짜만 선택 가능)", list(range(1, 32)))
             
         if st.button("📝 원티드 오프 신청하기", type="primary"):
             if len(selected_offs) > 0:
-                offs_str = ", ".join(map(str, sorted(selected_offs)))
-                for idx, row in df_temp.iterrows():
-                    nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-                    if str(nurse_id) == str(selected_nurse):
-                        df_temp.loc[idx, '원티드 오프'] = offs_str
-                        break
-                st.session_state["schedule_df_state"] = df_temp
-                st.success(f"✔️ {selected_nurse} 간호사: {offs_str}일 OFF 신청 완료!")
+                # 선택한 오프 일정 중 마감된 날짜가 있는지 최종 체크
+                closed_days = []
+                for d in selected_offs:
+                    # 나를 제외한 다른 사람들의 신청 수 합산
+                    other_count = sum(1 for n_id, days in st.session_state["wanted_off_log"].items() if d in days and str(n_id) != str(selected_nurse))
+                    if other_count >= limit_daily_off_request:
+                        closed_days.append(d)
+                        
+                if len(closed_days) > 0:
+                    st.error(f"❌ 신청 실패: 선택하신 날짜 중 {closed_days}일은 이미 선착순 마감되었습니다. 다른 날짜를 선택해 주세요.")
+                else:
+                    # 신청 시간 기록 (Timestamp) 생성 (예: "08/15 14:35")
+                    current_time_str = datetime.now().strftime("%m/%d %H:%M")
+                    
+                    # 세션 오프 로그 갱신
+                    if selected_nurse not in st.session_state["wanted_off_log"]:
+                        st.session_state["wanted_off_log"][selected_nurse] = {}
+                        
+                    # 이번에 선택한 날짜와 시간을 신규 등록
+                    st.session_state["wanted_off_log"][selected_nurse] = { d: current_time_str for d in selected_offs }
+                    
+                    # 템플릿 표의 '원티드 오프' 칸에 저장할 텍스트 제작: "3일(08/20 14:22), 5일(08/20 14:23)"
+                    detail_offs_list = []
+                    for d in sorted(selected_offs):
+                        t_str = st.session_state["wanted_off_log"][selected_nurse][d]
+                        detail_offs_list.append(f"{d}({t_str})")
+                    offs_formatted_str = ", ".join(detail_offs_list)
+                    
+                    # 데이터프레임 업데이트
+                    for idx, row in df_temp.iterrows():
+                        nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+                        if str(nurse_id) == str(selected_nurse):
+                            df_temp.loc[idx, '원티드 오프'] = offs_formatted_str
+                            break
+                            
+                    st.session_state["schedule_df_state"] = df_temp # 세션 갱신
+                    st.success(f"🎉 신청 완료: {selected_nurse} 간호사님 오프가 성공적으로 수집되었습니다! [기록: {offs_formatted_str}]")
+                    st.rerun() # 화면 즉시 갱신
             else:
-                st.warning("날짜를 선택해 주세요.")
+                st.warning("날짜를 최소 1개 이상 선택해 주세요.")
                 
     # ---------------- 탭 2: 수간호사 확인 대시보드 ----------------
     with tab_check:
-        st.write("### 📋 현재 업로드된 템플릿 현황")
-        st.info("💡 팁 1: 템플릿 엑셀에 미리 기입해 둔 'D', 'E', 'N', 'DE', '교육', 'OFF' 등은 AI가 건드리지 않고 그대로 유지(Lock)됩니다.")
-        st.info("💡 팁 2: 간호사 이름 옆이나 그룹 칸에 '야간전담'이라고 적으면, 자동으로 D/E가 제외되며 월 15일 고정 N이 배정됩니다.")
+        st.write("### 📋 현재 업로드된 템플릿 및 오프 취합 현황")
+        st.info("💡 간호사들의 원티드 신청 및 시간(Timestamp)이 실시간 취합된 결과입니다.")
         st.dataframe(st.session_state["schedule_df_state"])
         
-    # ---------------- 탭 3: AI 최적화 연산 실행판 ----------------
+        towrite_temp = io.BytesIO()
+        st.session_state["schedule_df_state"].to_excel(towrite_temp, index=False, header=True)
+        towrite_temp.seek(0)
+        st.download_button(
+            label="📥 현재까지 실시간 취합된 템플릿 파일 다운로드",
+            data=towrite_temp,
+            file_name="실시간_취합_템플릿.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+    # ---------------- 탭 3: AI 최종 생성판 ----------------
     with tab_result:
         st.write("### 🚀 고정 근무 및 야간전담이 연동된 AI 근무표 작성")
-        st.info("⚙️ 팁: 왼쪽 사이드바 메뉴에서 부서 맞춤 조건을 변경하시면 즉시 알고리즘 연산에 반영됩니다!")
+        st.info("⚙️ 팁: 수집된 시간 기록에서 숫자 일자만 똑똑하게 파싱하여 AI 오프 연동에 가동합니다.")
         max_iter = st.slider("최대 탐색 횟수 (탐색 횟수가 높을수록 정밀해집니다)", 10000, 150000, 60000, step=10000)
         
         if st.button("🔮 최종 AI 근무표 생성 시작", type="primary"):
@@ -393,7 +450,7 @@ if st.session_state["schedule_df_state"] is not None:
                             else:
                                 prev_df = pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
                         except Exception as e:
-                            st.warning(f"경고: 이전 달 근무표를 파싱하는 과정에서 오류가 발생했습니다. 이전 달 근무 연동 없이 연산을 시작합니다. (오류내용: {e})")
+                            st.warning(f"경고: 이전 달 근무표를 파싱하는 과정에서 오류가 발생했습니다. (오류내용: {e})")
                     
                     # 2. 간호사 추출 및 야간전담 분류 + 이전달 근무 기록 매핑
                     nurses = []
@@ -408,10 +465,13 @@ if st.session_state["schedule_df_state"] is not None:
                         if nurse_id is not None:
                             wanted = row['원티드 오프']
                             wanted_days = []
+                            # ⭐ [정규식 가변 숫자 날짜 추출]: "3(08/20 14:22)" 과 같은 기록에서 "3"이라는 순수 숫자 일자만 안전하게 정규식 파싱합니다.
                             if pd.notna(wanted) and str(wanted).strip() != '-':
-                                wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
+                                for x in str(wanted).split(','):
+                                    match = re.search(r'^\s*(\d+)', x.strip())
+                                    if match:
+                                        wanted_days.append(int(match.group(1)))
                             
-                            # 이전 달 근무 내역 추출
                             history = ['OFF'] * 7
                             if prev_df is not None:
                                 history = extract_nurse_history(prev_df, nurse_id)
@@ -426,7 +486,7 @@ if st.session_state["schedule_df_state"] is not None:
                             is_night_keepers.append(is_keeper)
                             nurse_histories.append(history)
                             
-                    # ⭐ 3. 요구 인원수 파싱 (D, E, N에 추가로 DE 듀티 요구량까지 동적 추적!)
+                    # 3. 요구 인원수 파싱
                     requirements = {}
                     default_values = {
                         'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
@@ -443,7 +503,6 @@ if st.session_state["schedule_df_state"] is not None:
                             break
                             
                     if start_idx is not None:
-                        # D, E, N, DE까지 탐색하기 위해 행 범위를 4로 확장
                         for i in range(4):
                             if start_idx + i < len(df_clean):
                                 row = df_clean.iloc[start_idx + i]
@@ -489,7 +548,7 @@ if st.session_state["schedule_df_state"] is not None:
                         ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N']
                     ]
                     
-                    # [수학적 벌점 충돌 차단 - DE 수량 포함 전면 리팩토링]
+                    # [수학적 벌점 충돌 차단]
                     num_keepers = sum(is_night_keepers)
                     num_normal = num_nurses - num_keepers
                     
@@ -521,7 +580,7 @@ if st.session_state["schedule_df_state"] is not None:
                     target_N_max = min(target_N_max, limit_max_monthly_night)
                     target_N_min = min(target_N_min, target_N_max)
                     
-                    # 4. 사용자가 수동으로 채워둔 고정 근무의 위치(Lock Mask) 식별 및 한글/교육 예외처리
+                    # 4. 사용자가 수동으로 채워둔 고정 근무의 위치(Lock Mask) 식별 및 한글 예외처리
                     is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                     fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
                     
@@ -538,7 +597,7 @@ if st.session_state["schedule_df_state"] is not None:
                             elif raw_val in ['N', '나이트', 'NIGHT']: val = 'N'
                             elif raw_val in ['DE']: val = 'DE'
                             elif raw_val in ['OFF', '오프', '휴무', '휴']: val = 'OFF'
-                            elif '교육' in raw_val: val = '교육' # 교육 근무 탐지 및 잠금
+                            elif '교육' in raw_val: val = '교육'
                             
                             if val in ['D', 'E', 'N', 'DE', 'OFF', '교육']:
                                 is_fixed[i, d] = True
@@ -547,7 +606,6 @@ if st.session_state["schedule_df_state"] is not None:
                     # 5. 하이브리드 고정 스케줄 초기화
                     sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts)
                     
-                    # 벌점 계산기 함수 호출
                     row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i]) for i in range(num_nurses)]
                     col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups) for d in range(num_days)]
                     total_penalty = sum(row_penalties) + sum(col_penalties)
@@ -633,7 +691,7 @@ if st.session_state["schedule_df_state"] is not None:
                 st.download_button(
                     label="📥 최종 근무표 Excel 다운로드",
                     data=towrite,
-                    file_name="최종_근무표_맞춤형조건반영.xlsx",
+                    file_name="최종_근무표_야간전담_이전달연동.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 else:
