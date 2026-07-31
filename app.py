@@ -16,8 +16,7 @@ st.title("🏥 3교대 간호사 스마트 근무표 작성 & 신청 시스템")
 st.subheader("모바일 원티드 신청 포털과 수간호사 제어판이 구글 데이터베이스를 통해 실시간 연동됩니다.")
 
 # ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 넣어주세요!
-GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec
-"
+GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"
 
 # 구글 데이터 읽어오기 함수
 def fetch_google_sheet_data():
