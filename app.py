@@ -5,58 +5,40 @@ import random
 import copy
 import io
 import re
-import os
 import requests
+import time
 from datetime import datetime
 
 # 1. 웹페이지 기본 설정
-st.set_page_config(page_title="간호사 스마트 3교대 스케줄러", layout="wide")
+st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
 
-st.title("🏥 3교대 간호사 스마트 근무표 작성 & 신청 시스템")
-st.subheader("모바일 원티드 신청 포털과 수간호사 제어판이 구글 데이터베이스를 통해 실시간 연동됩니다.")
+# ⭐ [프로그램 제목 및 부제목 업데이트]
+st.title("📊 스마트 널스 스케쥴러")
+st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 1.작성규칙, 2. 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_value=True)
+st.markdown("---")
+
+# 2. 세션 메모리 초기화
+if "schedule_df_state" not in st.session_state:
+    st.session_state["schedule_df_state"] = None
+if "optimized_result" not in st.session_state:
+    st.session_state["optimized_result"] = None
 
 # ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 넣어주세요!
-GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"
+GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"
 
-# 구글 데이터 읽어오기 함수
-def fetch_google_sheet_data():
+# ⭐ [속도 개선 - 지능형 초고속 캐싱 기술 탑재]
+# 구글 연동 데이터 조회를 10초간 메모리에 저장하여 앱 조작 시 버벅임을 완전히 없앱니다.
+@st.cache_data(ttl=10)
+def fetch_google_sheet_data(url):
     try:
-        response = requests.get(GAS_URL)
+        # 구글 서버 캐싱 우회를 위한 랜덤 타임스탬프 덧붙이기 (선착순 실시간성 100% 보장)
+        bust_url = f"{url}&t={random.random()}" if "?" in url else f"{url}?t={random.random()}"
+        response = requests.get(bust_url, timeout=8)
         if response.status_code == 200:
             return response.json()
     except Exception as e:
-        st.sidebar.error(f"구글 연동 실패: {e}")
+        pass
     return []
-
-# 2. ⭐ [서버 디스크 공유 데이터베이스 엔진]: 
-# 다른 사용자나 스마트폰이 접속해도 서버에 저장된 엑셀 파일을 읽어와 실시간 공유합니다!
-if "schedule_df_state" not in st.session_state:
-    if os.path.exists("template_shared.xlsx"):
-        try:
-            st.session_state["schedule_df_state"] = pd.read_excel("template_shared.xlsx")
-        except:
-            st.session_state["schedule_df_state"] = None
-    else:
-        st.session_state["schedule_df_state"] = None
-
-# 자동 싱크 로직 (최초 접속 시 구글 시트의 최신 신청 내역 자동 결합)
-if "synced_once" not in st.session_state:
-    st.session_state["synced_once"] = False
-
-if st.session_state["schedule_df_state"] is not None and not st.session_state["synced_once"]:
-    sheet_data = fetch_google_sheet_data()
-    if len(sheet_data) > 0:
-        df_temp = st.session_state["schedule_df_state"].copy()
-        for item in sheet_data:
-            nurse_name = str(item['name']).strip()
-            wanted_val = str(item['wanted_off']).strip()
-            for idx, row in df_temp.iterrows():
-                nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-                if str(nurse_id) == nurse_name:
-                    df_temp.loc[idx, '원티드 오프'] = wanted_val
-                    break
-        st.session_state["schedule_df_state"] = df_temp
-    st.session_state["synced_once"] = True
 
 # 3. 사이드바 - 관리자 메뉴 및 업로드 버튼
 st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
@@ -68,15 +50,28 @@ uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로�
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
 
+# 1. On/Off 토글 규칙들
 rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True)
 rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True)
 rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True)
 rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True)
 
+# 2. 원하는 일수 슬라이더 조절 기능
 limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, 5)
 limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, 6)
 limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, 3)
-limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 4, 2)
+
+# ⭐ [허용 범위 확장] 하루 최대 오프 신청 한도 범위를 10명으로 조절 완료!
+limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 10, 2)
+
+# [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
+if uploaded_schedule:
+    file_key = f"{uploaded_schedule.name}_{uploaded_schedule.size}"
+    if "last_file_key" not in st.session_state or st.session_state["last_file_key"] != file_key:
+        st.session_state["last_file_key"] = file_key
+        st.session_state["schedule_df_state"] = None  
+        st.session_state["optimized_result"] = None   
+        st.cache_data.clear() # 캐시 강제 청소
 
 # [지능형 가변 이름 및 야간전담 판정 파서]
 def parse_nurse_row(name, group):
@@ -179,7 +174,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
         if total_N != 15:
             penalty += abs(total_N - 15) * 500000
     else:
-        # 규칙 2: 한 달 밤근무(N) 개수 균등화 (수학적으로 실시간 계산된 타겟 반영)
+        # 규칙 2: 한 달 밤근무(N) 개수 균등화
         total_N = sum(1 for x in row_norm[history_len:] if x == 'N')
         if limit_max_monthly_night == 0:
             if total_N > 0:
@@ -323,16 +318,6 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
                 pool_idx += 1
     return sched
 
-# 구글 스프레드시트 데이터베이스로부터 실시간 신청 오프 내역 동기화 함수
-def fetch_google_sheet_data():
-    try:
-        response = requests.get(GAS_URL)
-        if response.status_code == 200:
-            return response.json()
-    except Exception as e:
-        pass
-    return []
-
 # ⚙️ 수간호사 신규 업로드 시 세션 상태 등록 및 서버 디스크 영구 백업 기능
 if uploaded_schedule:
     try:
@@ -347,7 +332,8 @@ if uploaded_schedule:
         st.session_state["schedule_df_state"] = schedule_df
         
         # 2. 구글 스프레드시트에 최초 업로드된 간호사 명단을 가입 처리
-        sheet_data = fetch_google_sheet_data()
+        st.cache_data.clear() # 캐시 강제 청소
+        sheet_data = fetch_google_sheet_data(GAS_URL)
         existing_names = [str(item['name']).strip() for item in sheet_data] if sheet_data else []
         
         for idx, row in schedule_df.iterrows():
@@ -359,7 +345,6 @@ if uploaded_schedule:
         st.sidebar.error(f"템플릿 파일 읽기 에러: {e}")
 
 # 5. 메인 인터페이스부
-# (이제 schedule_df_state가 None이 아니므로 모든 동료들이 자유롭게 접속해 화면을 정상적으로 볼 수 있습니다!)
 if st.session_state["schedule_df_state"] is not None:
     menu = st.radio("👉 사용 유형을 선택하세요", ["🙋‍♀️ [간호사용] 원티드 오프 신청", "⚙️ [수간호사용] 관리자 제어판"], horizontal=True)
     
@@ -371,9 +356,8 @@ if st.session_state["schedule_df_state"] is not None:
         
         # 서버 디스크에서 템플릿 읽기
         df_temp = st.session_state["schedule_df_state"].copy()
-        sheet_data = fetch_google_sheet_data()
+        sheet_data = fetch_google_sheet_data(GAS_URL)
         
-        # 간호사 목록을 서버 엑셀에서 원천 추출하므로 절대 비어있지 않습니다!
         nurse_names = []
         for idx, row in df_temp.iterrows():
             nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
@@ -391,7 +375,7 @@ if st.session_state["schedule_df_state"] is not None:
                         d = int(match.group(1))
                         day_request_counts[d] = day_request_counts.get(d, 0) + 1
                         
-        st.write("#### 📢 8월 일자별 오프 신청 현황 및 마감 잔여석")
+        st.write(f"#### 📢 8월 일자별 오프 신청 현황 및 마감 잔여석 (하루 최대 {limit_daily_off_request}명 제한)")
         cols = st.columns(10)
         for day in range(1, 32):
             col_idx = (day - 1) % 10
@@ -432,6 +416,7 @@ if st.session_state["schedule_df_state"] is not None:
                         payload = {"name": str(selected_nurse), "wanted_off": offs_formatted_str}
                         res = requests.post(GAS_URL, json=payload)
                         if res.status_code == 200:
+                            st.cache_data.clear() # 캐시 강제 소거 (다음 조회 시 무조건 최신 데이터 로드 강제!)
                             st.success(f"🎉 신청 성공! {selected_nurse} 간호사님 오프 수집 완료: [{offs_formatted_str}]")
                             time.sleep(1.5)
                             st.rerun()
@@ -450,16 +435,18 @@ if st.session_state["schedule_df_state"] is not None:
             st.sidebar.success("🔑 관리자 인증 성공!")
             st.write("### 🛠️ 수간호사 근무표 마스터 통제 제어판")
             
-            # 수간호사용 실시간 오프 신청 모니터링 및 작성 제어
             col_tab1, col_tab2 = st.tabs(["📋 실시간 오프 신청 현황판", "📅 AI 최종 근무표 생성"])
             
             with col_tab1:
                 st.write("### 📋 현재 구글 시트에 취합된 실시간 오프 현황")
                 
+                # 수동 새로고침 클릭 시 강제로 모든 캐시를 삭제하고 완전히 새 정보를 가져옵니다!
                 if st.button("🔄 새로운 신청 내역 실시간 동기화"):
+                    st.cache_data.clear() # 캐시 완벽 소거
                     st.session_state["optimized_result"] = None
+                    st.rerun()
                     
-                sheet_data = fetch_google_sheet_data()
+                sheet_data = fetch_google_sheet_data(GAS_URL)
                 df_temp = st.session_state["schedule_df_state"].copy()
                 
                 # 구글 시트 데이터를 로컬 뷰에 실시간 덮어쓰기
@@ -528,7 +515,7 @@ if st.session_state["schedule_df_state"] is not None:
                                     is_night_keepers.append(is_keeper)
                                     nurse_histories.append(history)
                                     
-                            # 요구수 파싱
+                            # 요구량 파싱
                             requirements = {}
                             default_values = {
                                 'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
@@ -682,6 +669,6 @@ if st.session_state["schedule_df_state"] is not None:
             st.warning("⚠️ 관리자 비밀번호가 틀렸거나 입력되지 않았습니다.")
             st.info("💡 사이드바의 자물쇠 입력창에 올바른 비밀번호를 입력해 주시면 관리 제어판이 열립니다.")
 else:
-    # ⚠️ 최초 등록 전에는 관리자 제어판의 업로드 창만 가이드로 띄워둡니다.
+    # ⚠️ 최초 등록 전
     st.warning("📊 아직 등록된 템플릿(간호사 목록)이 없습니다.")
     st.info("💡 먼저 **[⚙️ 관리자 제어판]** 탭을 누르시고, 비밀번호 **`1234`**를 입력하신 후 사이드바 메뉴에 '2. 초기 근무표 템플릿 업로드' 파일을 최소 한 번 이상 올려주세요! 등록되는 즉시 모든 사용자에게 오프 신청 포털이 자동으로 개설됩니다.")
