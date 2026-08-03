@@ -22,20 +22,28 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 꼭 넣어주세요!
+# ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 넣어주세요!
 GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"""
 
-# ⭐ [에러 자가진단 기능이 보완된 데이터 로딩 함수]
+# ⭐ [에러 실시간 판독 추적형 데이터 로딩 함수]
 def fetch_google_sheet_data():
     try:
         bust_url = f"{GAS_URL}&t={random.random()}" if "?" in GAS_URL else f"{GAS_URL}?t={random.random()}"
         response = requests.get(bust_url, timeout=8)
+        
+        # 구글 서버 자체에서 에러를 리턴했거나 연결이 끊어졌을 때의 진짜 에러를 한글로 가공해 화면에 찍어줍니다.
         if response.status_code == 200:
-            return response.json()
+            res_json = response.json()
+            # 만약 구글 측에서 자가진단 에러 메시지를 보냈다면 사이드바에 표시
+            if isinstance(res_json, dict) and "error" in res_json:
+                st.sidebar.error(f"🚨 구글 스크립트 연동 오류: {res_json['error']}")
+                return []
+            return res_json
         else:
-            st.sidebar.error(f"🚨 구글 서버 응답 오류 (상태코드: {response.status_code})")
+            st.sidebar.error(f"🚨 구글 서버 접근 오류 (상태코드: {response.status_code})\n"
+                             f"구글 앱스 스크립트의 새 버전 배포 및 권한(Anyone) 설정을 한 번 더 체크해 주세요.")
     except Exception as e:
-        st.sidebar.error(f"🚨 구글 연결 실패 원인: {e}")
+        st.sidebar.error(f"🚨 시스템 연결 실패 원인: {e}")
     return []
 
 # 서버 공유 설정값 로드 함수
@@ -420,16 +428,17 @@ if st.session_state["schedule_df_state"] is not None:
             if nurse_id is not None:
                 nurse_names.append(nurse_id)
         
-        # 구글 시트에 실시간 쌓인 오프 갯수 계산 (이름 소수점 자동 보정 처리)
+        # 구글 시트에 실시간 쌓인 오프 갯수 계산
         day_request_counts = {}
         for item in sheet_data:
-            wanted = item['wanted_off']
-            if pd.notna(wanted) and wanted.strip() != '' and wanted.strip() != 'nan':
-                for x in str(wanted).split(','):
-                    match = re.search(r'^\s*(\d+)', x.strip())
-                    if match:
-                        d = int(match.group(1))
-                        day_request_counts[d] = day_request_counts.get(d, 0) + 1
+            if 'error' not in item:
+                wanted = item['wanted_off']
+                if pd.notna(wanted) and wanted.strip() != '' and wanted.strip() != 'nan':
+                    for x in str(wanted).split(','):
+                        match = re.search(r'^\s*(\d+)', x.strip())
+                        if match:
+                            d = int(match.group(1))
+                            day_request_counts[d] = day_request_counts.get(d, 0) + 1
                         
         st.write(f"#### 📢 {target_month}월 일자별 오프 신청 현황 및 마감 잔여석 (하루 최대 {limit_daily_off_request}명 제한)")
         cols = st.columns(10)
@@ -456,7 +465,7 @@ if st.session_state["schedule_df_state"] is not None:
                 closed_days = []
                 for d in selected_offs:
                     # 타인 신청 인원수 구글 시트에서 즉시 계산
-                    other_count = sum(1 for item in sheet_data if d in [int(re.search(r'^\s*(\d+)', x.strip()).group(1)) for x in str(item['wanted_off']).split(',') if re.search(r'^\s*(\d+)', x.strip())] and str(item['name']).strip().replace('.0', '') != str(selected_nurse).replace('.0', ''))
+                    other_count = sum(1 for item in sheet_data if 'error' not in item and d in [int(re.search(r'^\s*(\d+)', x.strip()).group(1)) for x in str(item['wanted_off']).split(',') if re.search(r'^\s*(\d+)', x.strip())] and str(item['name']).strip().replace('.0', '') != str(selected_nurse).replace('.0', ''))
                     if other_count >= limit_daily_off_request:
                         closed_days.append(d)
                         
@@ -505,13 +514,14 @@ if st.session_state["schedule_df_state"] is not None:
                 
                 # 구글 시트 데이터를 로컬 뷰에 실시간 덮어쓰기 (이름 소수점 제거 매핑으로 버그 완치!)
                 for item in sheet_data:
-                    nurse_name = str(item['name']).strip().replace('.0', '')
-                    wanted_val = str(item['wanted_off']).strip()
-                    for idx, row in df_temp.iterrows():
-                        nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-                        if str(nurse_id).replace('.0', '') == nurse_name:
-                            df_temp.loc[idx, '원티드 오프'] = wanted_val
-                            break
+                    if 'error' not in item:
+                        nurse_name = str(item['name']).strip().replace('.0', '')
+                        wanted_val = str(item['wanted_off']).strip()
+                        for idx, row in df_temp.iterrows():
+                            nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+                            if str(nurse_id).replace('.0', '') == nurse_name:
+                                df_temp.loc[idx, '원티드 오프'] = wanted_val
+                                break
                 st.session_state["schedule_df_state"] = df_temp
                 st.dataframe(df_temp)
                 
@@ -592,7 +602,7 @@ if st.session_state["schedule_df_state"] is not None:
                                         row = df_clean.iloc[start_idx + i]
                                         duty = None
                                         for col in df_clean.columns:
-                                            if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
+                                            if str(col).strip() not in [str(d) for d in range(1, 32)]:
                                                 val_str = str(row[col]).strip().upper()
                                                 if val_str in ['D', 'E', 'N', 'DE']:
                                                     duty = val_str
