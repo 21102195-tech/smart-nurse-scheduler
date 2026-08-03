@@ -6,7 +6,6 @@ import copy
 import io
 import re
 import requests
-import time
 from datetime import datetime
 
 # 1. 웹페이지 기본 설정
@@ -23,15 +22,13 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 넣어주세요!
+# 구글 API 주소 연동
 GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"
 
-# ⭐ [속도 개선 - 지능형 초고속 캐싱 기술 탑재]
-# 구글 연동 데이터 조회를 10초간 메모리에 저장하여 앱 조작 시 버벅임을 완전히 없앱니다.
-@st.cache_data(ttl=10)
+# ⭐ 실시간 동기화 정확성을 위해 캐시 장치를 완전히 삭제하여 100% 실시간성 보장!
 def fetch_google_sheet_data(url):
     try:
-        # 구글 서버 캐싱 우회를 위한 랜덤 타임스탬프 덧붙이기 (선착순 실시간성 100% 보장)
+        # 캐싱 우회를 위한 랜덤 쿼리 결합
         bust_url = f"{url}&t={random.random()}" if "?" in url else f"{url}?t={random.random()}"
         response = requests.get(bust_url, timeout=8)
         if response.status_code == 200:
@@ -46,22 +43,37 @@ uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xl
 uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
 uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
 
+# ⭐ [지능형 가변 월 자동 감지 시스템]
+# 업로드된 파일명에서 숫자('8월', '9월')를 자동으로 감지해 기본값으로 활용합니다.
+detected_month = 8  # 기본 8월
+if uploaded_schedule:
+    match = re.search(r'(\d+)\s*월', uploaded_schedule.name)
+    if match:
+        detected_month = int(match.group(1))
+    else:
+        match_digit = re.findall(r'\b(1[0-2]|[1-9])\b', uploaded_schedule.name)
+        if match_digit:
+            detected_month = int(match_digit[0])
+
+# 수간호사 선생님이 필요시 가변 조절할 수 있도록 사이드바에 월 선택 패널 구현
+target_month = st.sidebar.number_input("📅 스케줄 대상 월 설정", min_value=1, max_value=12, value=detected_month, step=1)
+
 # 🛠 [부서별 맞춤 근무 조건 설정]
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
 
-# 1. On/Off 토글 규칙들
+# On/Off 토글 규칙들
 rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True)
 rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True)
 rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True)
 rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True)
 
-# 2. 원하는 일수 슬라이더 조절 기능
+# 원하는 일수 슬라이더 조절 기능
 limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, 5)
 limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, 6)
 limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, 3)
 
-# ⭐ [허용 범위 확장] 하루 최대 오프 신청 한도 범위를 10명으로 조절 완료!
+# ⭐ [허용 인원수 확장]: 하루 최대 오프 신청 한도 범위를 10명으로 확장 완료!
 limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 10, 2)
 
 # [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
@@ -71,7 +83,6 @@ if uploaded_schedule:
         st.session_state["last_file_key"] = file_key
         st.session_state["schedule_df_state"] = None  
         st.session_state["optimized_result"] = None   
-        st.cache_data.clear() # 캐시 강제 청소
 
 # [지능형 가변 이름 및 야간전담 판정 파서]
 def parse_nurse_row(name, group):
@@ -332,7 +343,6 @@ if uploaded_schedule:
         st.session_state["schedule_df_state"] = schedule_df
         
         # 2. 구글 스프레드시트에 최초 업로드된 간호사 명단을 가입 처리
-        st.cache_data.clear() # 캐시 강제 청소
         sheet_data = fetch_google_sheet_data(GAS_URL)
         existing_names = [str(item['name']).strip() for item in sheet_data] if sheet_data else []
         
@@ -351,12 +361,17 @@ if st.session_state["schedule_df_state"] is not None:
     # ----------------- [뷰 1] 간호사용 원티드 오프 신청 포털 -----------------
     if menu == "🙋‍♀️ [간호사용] 원티드 오프 신청":
         st.markdown("---")
-        st.write("### 📅 원하는 휴무일 직접 신청")
+        st.write(f"### 📅 {target_month}월 원하는 휴무일 직접 신청")
         st.info("💡 원하는 휴가 날짜를 지정하고 신청을 완료하면, 구글 스프레드시트에 신청 시간과 함께 실시간 저장됩니다.")
         
         # 서버 디스크에서 템플릿 읽기
         df_temp = st.session_state["schedule_df_state"].copy()
         sheet_data = fetch_google_sheet_data(GAS_URL)
+        
+        # ⭐ [지능형 달의 일수 자동 계산 시스템]
+        # 업로드된 템플릿에서 '1'부터 '31'까지 중 가장 큰 숫자열을 찾아 해당 달의 진짜 일수(num_days)를 동적으로 판정합니다!
+        day_cols_detected = [int(col) for col in df_temp.columns if str(col).strip().isdigit()]
+        num_days_dynamic = max(day_cols_detected) if day_cols_detected else 31
         
         nurse_names = []
         for idx, row in df_temp.iterrows():
@@ -375,9 +390,11 @@ if st.session_state["schedule_df_state"] is not None:
                         d = int(match.group(1))
                         day_request_counts[d] = day_request_counts.get(d, 0) + 1
                         
-        st.write(f"#### 📢 8월 일자별 오프 신청 현황 및 마감 잔여석 (하루 최대 {limit_daily_off_request}명 제한)")
+        st.write(f"#### 📢 {target_month}월 일자별 오프 신청 현황 및 마감 잔여석 (하루 최대 {limit_daily_off_request}명 제한)")
         cols = st.columns(10)
-        for day in range(1, 32):
+        
+        # ⭐ 동적으로 계산된 해당 월의 일수(num_days_dynamic)만큼만 달력 버튼을 출력합니다!
+        for day in range(1, num_days_dynamic + 1):
             col_idx = (day - 1) % 10
             count = day_request_counts.get(day, 0)
             rem = max(0, limit_daily_off_request - count)
@@ -393,7 +410,7 @@ if st.session_state["schedule_df_state"] is not None:
         with col1:
             selected_nurse = st.selectbox("1. 본인의 이름을 선택하세요", nurse_names, format_func=lambda x: f"{x}번 간호사" if str(x).replace('.0', '').isdigit() else f"{x} 간호사")
         with col2:
-            selected_offs = st.multiselect("2. 희망 휴무일을 복수 선택하세요 (마감된 날짜 제외)", list(range(1, 32)))
+            selected_offs = st.multiselect("2. 희망 휴무일을 복수 선택하세요 (마감된 날짜 제외)", list(range(1, num_days_dynamic + 1)))
             
         if st.button("📝 원티드 오프 신청하기", type="primary"):
             if len(selected_offs) > 0:
@@ -416,7 +433,6 @@ if st.session_state["schedule_df_state"] is not None:
                         payload = {"name": str(selected_nurse), "wanted_off": offs_formatted_str}
                         res = requests.post(GAS_URL, json=payload)
                         if res.status_code == 200:
-                            st.cache_data.clear() # 캐시 강제 소거 (다음 조회 시 무조건 최신 데이터 로드 강제!)
                             st.success(f"🎉 신청 성공! {selected_nurse} 간호사님 오프 수집 완료: [{offs_formatted_str}]")
                             time.sleep(1.5)
                             st.rerun()
@@ -438,11 +454,10 @@ if st.session_state["schedule_df_state"] is not None:
             col_tab1, col_tab2 = st.tabs(["📋 실시간 오프 신청 현황판", "📅 AI 최종 근무표 생성"])
             
             with col_tab1:
-                st.write("### 📋 현재 구글 시트에 취합된 실시간 오프 현황")
+                st.write(f"### 📋 현재 구글 시트에 취합된 실시간 오프 현황 ({target_month}월 스케줄)")
                 
-                # 수동 새로고침 클릭 시 강제로 모든 캐시를 삭제하고 완전히 새 정보를 가져옵니다!
+                # 수동 새로고침 클릭 시 완벽 동기화
                 if st.button("🔄 새로운 신청 내역 실시간 동기화"):
-                    st.cache_data.clear() # 캐시 완벽 소거
                     st.session_state["optimized_result"] = None
                     st.rerun()
                     
@@ -462,7 +477,7 @@ if st.session_state["schedule_df_state"] is not None:
                 st.dataframe(df_temp)
                 
             with col_tab2:
-                st.write("### 🚀 AI 3교대 스마트 근무표 작성 시작")
+                st.write(f"### 🚀 AI 3교대 스마트 근무표 작성 시작 ({target_month}월)")
                 max_iter_val = st.slider("최대 탐색 횟수", 10000, 150000, 60000, step=10000)
                 
                 if st.button("🔮 최종 AI 근무표 생성 시작", type="primary"):
@@ -480,6 +495,10 @@ if st.session_state["schedule_df_state"] is not None:
                                 try:
                                     prev_df = pd.read_excel(uploaded_prev_month) if uploaded_prev_month.name.endswith('xlsx') else pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
                                 except: pass
+                            
+                            # ⭐ [지능형 달의 일수 자동 감지]
+                            day_cols_detected = [int(col) for col in df_clean.columns if str(col).strip().isdigit()]
+                            num_days_dynamic = max(day_cols_detected) if day_cols_detected else 31
                             
                             # 1. 간호사 추출 및 야간전담 분류 + 이전달 근무 기록 매핑
                             nurses = []
@@ -518,10 +537,10 @@ if st.session_state["schedule_df_state"] is not None:
                             # 요구량 파싱
                             requirements = {}
                             default_values = {
-                                'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
-                                'E': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
-                                'N': [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
-                                'DE': [0] * 31
+                                'D': [3] * num_days_dynamic,
+                                'E': [3] * num_days_dynamic,
+                                'N': [3] * num_days_dynamic,
+                                'DE': [0] * num_days_dynamic
                             }
                             start_idx = None
                             for idx, row in enumerate(df_clean.values):
@@ -535,14 +554,14 @@ if st.session_state["schedule_df_state"] is not None:
                                         row = df_clean.iloc[start_idx + i]
                                         duty = None
                                         for col in df_clean.columns:
-                                            if str(col).strip() not in [str(d) for d in range(1, 32)]:
+                                            if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
                                                 val_str = str(row[col]).strip().upper()
                                                 if val_str in ['D', 'E', 'N', 'DE']:
                                                     duty = val_str
                                                     break
                                         if duty:
                                             day_values = []
-                                            for d in range(1, 32):
+                                            for d in range(1, num_days_dynamic + 1):
                                                 col_name = str(d) if str(d) in df_clean.columns else (int(d) if int(d) in df_clean.columns else d)
                                                 val = int(float(row[col_name])) if pd.notna(row[col_name]) and str(row[col_name]).strip() != '' else default_values[duty][d-1]
                                                 day_values.append(val)
@@ -558,7 +577,7 @@ if st.session_state["schedule_df_state"] is not None:
                             total_keeper_N = num_keepers * 15
                             total_normal_N = max(0, total_N_required - total_keeper_N)
                             total_normal_shifts = max(0, total_shifts_required - (num_keepers * 15))
-                            total_normal_OFF = max(0, (num_normal * 31) - total_normal_shifts)
+                            total_normal_OFF = max(0, (num_normal * num_days_dynamic) - total_normal_shifts)
                             
                             if num_normal > 0:
                                 avg_normal_N = total_normal_N / num_normal
@@ -570,12 +589,12 @@ if st.session_state["schedule_df_state"] is not None:
                             else:
                                 target_N_min, target_N_max, target_OFF_min, target_OFF_max = 0, 0, 0, 0
                                 
-                            is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
-                            fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
+                            is_fixed = np.zeros((num_nurses, num_days_dynamic), dtype=bool)
+                            fixed_shifts = np.empty((num_nurses, num_days_dynamic), dtype=object)
                             for i, nurse in enumerate(nurses):
                                 row_idx = nurse['row_idx']
                                 row = df_clean.iloc[row_idx]
-                                for d in range(num_days):
+                                for d in range(num_days_dynamic):
                                     col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
                                     raw_val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else ""
                                     val = ""
@@ -589,11 +608,11 @@ if st.session_state["schedule_df_state"] is not None:
                                         is_fixed[i, d] = True
                                         fixed_shifts[i, d] = val
                                         
-                            sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts)
+                            sched = initialize_schedule_hybrid(num_nurses, num_days_dynamic, requirements, is_fixed, fixed_shifts)
                             nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
                             
-                            row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i]) for i in range(num_nurses)]
-                            col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups) for d in range(num_days)]
+                            row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days_dynamic, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i]) for i in range(num_nurses)]
+                            col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups) for d in range(num_days_dynamic)]
                             total_penalty = sum(row_penalties) + sum(col_penalties)
                             
                             best_sched = copy.deepcopy(sched)
@@ -603,7 +622,7 @@ if st.session_state["schedule_df_state"] is not None:
                             cooling_rate = 0.9999
                             
                             for step in range(max_iter_val):
-                                d = random.randint(0, num_days - 1)
+                                d = random.randint(0, num_days_dynamic - 1)
                                 i1 = random.randint(0, num_nurses - 1)
                                 i2 = random.randint(0, num_nurses - 1)
                                 while i1 == i2: i2 = random.randint(0, num_nurses - 1)
@@ -616,8 +635,8 @@ if st.session_state["schedule_df_state"] is not None:
                                 
                                 sched[i1, d], sched[i2, d] = old_shift_i2, old_shift_i1
                                 
-                                new_row_pen_i1 = get_nurse_penalty(sched[i1], i1, nurse_wanted_off[i1], num_days, forbidden_5_patterns, is_night_keepers[i1], nurse_histories[i1], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i1])
-                                new_row_pen_i2 = get_nurse_penalty(sched[i2], i2, nurse_wanted_off[i2], num_days, forbidden_5_patterns, is_night_keepers[i2], nurse_histories[i2], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i2])
+                                new_row_pen_i1 = get_nurse_penalty(sched[i1], i1, nurse_wanted_off[i1], num_days_dynamic, forbidden_5_patterns, is_night_keepers[i1], nurse_histories[i1], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i1])
+                                new_row_pen_i2 = get_nurse_penalty(sched[i2], i2, nurse_wanted_off[i2], num_days_dynamic, forbidden_5_patterns, is_night_keepers[i2], nurse_histories[i2], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i2])
                                 new_col_pen = get_day_penalty(sched[:, d], num_nurses, nurse_groups)
                                 
                                 new_total_penalty = (total_penalty - old_row_pen_i1 - old_row_pen_i2 - old_col_pen + new_row_pen_i1 + new_row_pen_i2 + new_col_pen)
@@ -644,7 +663,7 @@ if st.session_state["schedule_df_state"] is not None:
                                     
                             for i, nurse in enumerate(nurses):
                                 row_idx = nurse['row_idx']
-                                for d in range(num_days):
+                                for d in range(num_days_dynamic):
                                     col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
                                     df_clean.loc[row_idx, col_name] = best_sched[i, d]
                                     
@@ -662,13 +681,13 @@ if st.session_state["schedule_df_state"] is not None:
                         st.download_button(
                             label="📥 최종 근무표 Excel 다운로드",
                             data=towrite,
-                            file_name="최종_근무표_야간전담_이전달연동.xlsx",
+                            file_name=f"최종_근무표_{target_month}월_스마트반영.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
         else:
             st.warning("⚠️ 관리자 비밀번호가 틀렸거나 입력되지 않았습니다.")
             st.info("💡 사이드바의 자물쇠 입력창에 올바른 비밀번호를 입력해 주시면 관리 제어판이 열립니다.")
 else:
-    # ⚠️ 최초 등록 전
+    # 최초 등록 전
     st.warning("📊 아직 등록된 템플릿(간호사 목록)이 없습니다.")
     st.info("💡 먼저 **[⚙️ 관리자 제어판]** 탭을 누르시고, 비밀번호 **`1234`**를 입력하신 후 사이드바 메뉴에 '2. 초기 근무표 템플릿 업로드' 파일을 최소 한 번 이상 올려주세요! 등록되는 즉시 모든 사용자에게 오프 신청 포털이 자동으로 개설됩니다.")
