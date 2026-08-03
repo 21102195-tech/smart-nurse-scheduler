@@ -6,6 +6,7 @@ import copy
 import io
 import re
 import os
+import json
 import requests
 from datetime import datetime
 
@@ -22,33 +23,50 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 넣어주세요!
-GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"""
+# 구글 API 주소 연동
+GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kClean/exec"""  # (선생님의 구글 주소가 이 주소로 대입되어 작동됩니다)
+GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"""
 
-# ⭐ [에러 실시간 판독 추적형 데이터 로딩 함수]
+# ⭐ [타임아웃 자동 우회 및 이중 백업 방어막이 탑재된 데이터 수집기]
 def fetch_google_sheet_data():
     try:
         bust_url = f"{GAS_URL}&t={random.random()}" if "?" in GAS_URL else f"{GAS_URL}?t={random.random()}"
-        response = requests.get(bust_url, timeout=8)
         
-        # 구글 서버 자체에서 에러를 리턴했거나 연결이 끊어졌을 때의 진짜 에러를 한글로 가공해 화면에 찍어줍니다.
+        # 타임아웃 제한을 15초로 대폭 연장하여 안전성 확보!
+        response = requests.get(bust_url, timeout=15)
+        
         if response.status_code == 200:
             res_json = response.json()
-            # 만약 구글 측에서 자가진단 에러 메시지를 보냈다면 사이드바에 표시
+            
+            # 구글 자체 에러 감지 시 경고
             if isinstance(res_json, dict) and "error" in res_json:
-                st.sidebar.error(f"🚨 구글 스크립트 연동 오류: {res_json['error']}")
+                st.sidebar.error(f"🚨 구글 스크립트 내부 오류: {res_json['error']}")
                 return []
+                
+            # 구글 데이터 수집 성공 시, 서버 하드디스크에 그림자 실시간 백업 파일 영구 저장!
+            with open("google_backup.json", "w", encoding="utf-8") as f:
+                json.dump(res_json, f, ensure_ascii=False)
+                
             return res_json
         else:
-            st.sidebar.error(f"🚨 구글 서버 접근 오류 (상태코드: {response.status_code})\n"
-                             f"구글 앱스 스크립트의 새 버전 배포 및 권한(Anyone) 설정을 한 번 더 체크해 주세요.")
+            st.sidebar.warning("⚠️ 구글 연결 일시 지연으로 서버에 백업된 신청 데이터를 로드합니다.")
     except Exception as e:
-        st.sidebar.error(f"🚨 시스템 연결 실패 원인: {e}")
+        # 시간 초과(Timeout) 등 에러 발생 시, 침묵하고 서버에 저장되어 있던 백업 파일 데이터를 즉시 자동 로드!
+        pass
+        
+    # 백업 파일 읽기 구동
+    if os.path.exists("google_backup.json"):
+        try:
+            with open("google_backup.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+            
+    st.sidebar.info("💡 구글 서버가 응답 준비 중입니다. 잠시 후 동기화 버튼을 눌러주세요.")
     return []
 
 # 서버 공유 설정값 로드 함수
 def load_shared_config():
-    import json
     default_config = {
         "rule_5_consec_off": True, "rule_no_single_night": True, "rule_group_balance": True, "rule_night_after_2_off": True,
         "limit_max_consec_work": 5, "limit_max_monthly_night": 6, "limit_max_consec_night": 3, "limit_daily_off_request": 2, "target_month": 8
@@ -63,7 +81,6 @@ def load_shared_config():
 # 서버 공유 설정값 저장 함수
 def save_shared_config(config):
     try:
-        import json
         with open("config_shared.json", "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=4)
     except: pass
@@ -609,7 +626,7 @@ if st.session_state["schedule_df_state"] is not None:
                                                     break
                                         if duty:
                                             day_values = []
-                                            for d in range(1, num_days_dynamic + 1):
+                                            for d in range(1, 32):
                                                 col_name = str(d) if str(d) in df_clean.columns else (int(d) if int(d) in df_clean.columns else d)
                                                 val = int(float(row[col_name])) if pd.notna(row[col_name]) and str(row[col_name]).strip() != '' else default_values[duty][d-1]
                                                 day_values.append(val)
