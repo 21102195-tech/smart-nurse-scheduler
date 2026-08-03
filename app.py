@@ -23,7 +23,7 @@ if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
 # ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 꼭 넣어주세요!
-GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"""
+GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"""
 
 # ⭐ [에러 자가진단 기능이 보완된 데이터 로딩 함수]
 def fetch_google_sheet_data():
