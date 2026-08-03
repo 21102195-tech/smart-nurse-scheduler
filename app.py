@@ -6,8 +6,8 @@ import copy
 import io
 import re
 import os
-import json
 import requests
+import json
 from datetime import datetime
 
 # 1. 웹페이지 기본 설정
@@ -23,46 +23,35 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# 구글 API 주소 연동
-GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kClean/exec"""  # (선생님의 구글 주소가 이 주소로 대입되어 작동됩니다)
-GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"""
+# ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 꼭 넣어주세요!
+GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJO8Dwyf3irDy7zn8ZI/exec"""
 
-# ⭐ [타임아웃 자동 우회 및 이중 백업 방어막이 탑재된 데이터 수집기]
+# [에러 실시간 판독 추적형 데이터 로딩 함수]
 def fetch_google_sheet_data():
     try:
         bust_url = f"{GAS_URL}&t={random.random()}" if "?" in GAS_URL else f"{GAS_URL}?t={random.random()}"
-        
-        # 타임아웃 제한을 15초로 대폭 연장하여 안전성 확보!
         response = requests.get(bust_url, timeout=15)
         
         if response.status_code == 200:
             res_json = response.json()
-            
-            # 구글 자체 에러 감지 시 경고
             if isinstance(res_json, dict) and "error" in res_json:
-                st.sidebar.error(f"🚨 구글 스크립트 내부 오류: {res_json['error']}")
+                st.sidebar.error(f"🚨 구글 스크립트 연동 오류: {res_json['error']}")
                 return []
-                
-            # 구글 데이터 수집 성공 시, 서버 하드디스크에 그림자 실시간 백업 파일 영구 저장!
+            
+            # 수집 성공 시 그림자 영구 백업본 생성
             with open("google_backup.json", "w", encoding="utf-8") as f:
                 json.dump(res_json, f, ensure_ascii=False)
-                
             return res_json
         else:
-            st.sidebar.warning("⚠️ 구글 연결 일시 지연으로 서버에 백업된 신청 데이터를 로드합니다.")
+            st.sidebar.warning("⚠️ 구글 지연으로 서버에 임시 백업된 데이터를 사용합니다.")
     except Exception as e:
-        # 시간 초과(Timeout) 등 에러 발생 시, 침묵하고 서버에 저장되어 있던 백업 파일 데이터를 즉시 자동 로드!
         pass
         
-    # 백업 파일 읽기 구동
     if os.path.exists("google_backup.json"):
         try:
             with open("google_backup.json", "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
-            pass
-            
-    st.sidebar.info("💡 구글 서버가 응답 준비 중입니다. 잠시 후 동기화 버튼을 눌러주세요.")
+        except: pass
     return []
 
 # 서버 공유 설정값 로드 함수
@@ -126,13 +115,14 @@ if st.session_state["schedule_df_state"] is not None and not st.session_state["s
     if len(sheet_data) > 0:
         df_temp = st.session_state["schedule_df_state"].copy()
         for item in sheet_data:
-            nurse_name = str(item['name']).strip().replace('.0', '')
-            wanted_val = str(item['wanted_off']).strip()
-            for idx, row in df_temp.iterrows():
-                nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-                if str(nurse_id) == nurse_name:
-                    df_temp.loc[idx, '원티드 오프'] = wanted_val
-                    break
+            if 'error' not in item:
+                nurse_name = str(item['name']).strip().replace('.0', '')
+                wanted_val = str(item['wanted_off']).strip()
+                for idx, row in df_temp.iterrows():
+                    nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+                    if str(nurse_id) == nurse_name:
+                        df_temp.loc[idx, '원티드 오프'] = wanted_val
+                        break
         st.session_state["schedule_df_state"] = df_temp
     st.session_state["synced_once"] = True
 
@@ -400,28 +390,6 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
                 pool_idx += 1
     return sched
 
-# 수간호사 신규 파일 등록 및 서버 하드디스크 영구 동기화
-if uploaded_schedule:
-    try:
-        raw_df = pd.read_excel(uploaded_schedule) if uploaded_schedule.name.endswith('xlsx') else pd.read_csv(uploaded_schedule, encoding='utf-8-sig')
-        schedule_df = load_and_align_headers(raw_df)
-        
-        # 1. 서버 하드디스크에 영구 고정 저장 (절대 유실되지 않음!)
-        schedule_df.to_excel("template_shared.xlsx", index=False)
-        st.session_state["schedule_df_state"] = schedule_df
-        
-        # 2. 구글 스프레드시트에 최초 업로드된 간호사 명단을 가입 처리
-        sheet_data = fetch_google_sheet_data()
-        existing_names = [str(item['name']).strip().replace('.0', '') for item in sheet_data] if sheet_data else []
-        
-        for idx, row in schedule_df.iterrows():
-            nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
-            if nurse_id is not None and str(nurse_id) not in existing_names:
-                requests.post(GAS_URL, json={"name": str(nurse_id), "wanted_off": "-"})
-        st.sidebar.success("✅ 새로운 템플릿이 서버와 데이터베이스에 성공적으로 등록되었습니다!")
-    except Exception as e:
-        st.sidebar.error(f"템플릿 파일 읽기 에러: {e}")
-
 # 5. 메인 인터페이스부
 if st.session_state["schedule_df_state"] is not None:
     menu = st.radio("👉 사용 유형을 선택하세요", ["🙋‍♀️ [간호사용] 원티드 오프 신청", "⚙️ [수간호사용] 관리자 제어판"], horizontal=True)
@@ -445,7 +413,7 @@ if st.session_state["schedule_df_state"] is not None:
             if nurse_id is not None:
                 nurse_names.append(nurse_id)
         
-        # 구글 시트에 실시간 쌓인 오프 갯수 계산
+        # 구글 시트에 실시간 쌓인 오프 갯수 계산 (이름 소수점 자동 보정 처리)
         day_request_counts = {}
         for item in sheet_data:
             if 'error' not in item:
@@ -481,7 +449,7 @@ if st.session_state["schedule_df_state"] is not None:
             if len(selected_offs) > 0:
                 closed_days = []
                 for d in selected_offs:
-                    # 타인 신청 인원수 구글 시트에서 즉시 계산
+                    # 타인 신청 인원수 구글 시트에서 즉시 계산 (버그 완치형 동적 형변환 비교 장착)
                     other_count = sum(1 for item in sheet_data if 'error' not in item and d in [int(re.search(r'^\s*(\d+)', x.strip()).group(1)) for x in str(item['wanted_off']).split(',') if re.search(r'^\s*(\d+)', x.strip())] and str(item['name']).strip().replace('.0', '') != str(selected_nurse).replace('.0', ''))
                     if other_count >= limit_daily_off_request:
                         closed_days.append(d)
@@ -498,9 +466,14 @@ if st.session_state["schedule_df_state"] is not None:
                         payload = {"name": str(selected_nurse), "wanted_off": offs_formatted_str}
                         res = requests.post(GAS_URL, json=payload)
                         if res.status_code == 200:
-                            st.success(f"🎉 신청 성공! {selected_nurse} 간호사님 오프 수집 완료: [{offs_formatted_str}]")
-                            time.sleep(1.5)
-                            st.rerun()
+                            # ⭐ [실시간 저장 실패 감시 코드 연동]: 구글 서버에서 반환한 결과 JSON이 "success"가 아닌 경우 에러 출력!
+                            res_json = res.json()
+                            if isinstance(res_json, dict) and "error" in res_json:
+                                st.error(f"❌ 구글 저장 실패: {res_json['error']}")
+                            else:
+                                st.success(f"🎉 신청 성공! {selected_nurse} 간호사님 오프 수집 완료: [{offs_formatted_str}]")
+                                time.sleep(1.5)
+                                st.rerun()
                     except Exception as e:
                         st.error(f"구글 서버 전송 중 오류 발생: {e}")
             else:
@@ -619,14 +592,14 @@ if st.session_state["schedule_df_state"] is not None:
                                         row = df_clean.iloc[start_idx + i]
                                         duty = None
                                         for col in df_clean.columns:
-                                            if str(col).strip() not in [str(d) for d in range(1, 32)]:
+                                            if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
                                                 val_str = str(row[col]).strip().upper()
                                                 if val_str in ['D', 'E', 'N', 'DE']:
                                                     duty = val_str
                                                     break
                                         if duty:
                                             day_values = []
-                                            for d in range(1, 32):
+                                            for d in range(1, num_days_dynamic + 1):
                                                 col_name = str(d) if str(d) in df_clean.columns else (int(d) if int(d) in df_clean.columns else d)
                                                 val = int(float(row[col_name])) if pd.notna(row[col_name]) and str(row[col_name]).strip() != '' else default_values[duty][d-1]
                                                 day_values.append(val)
@@ -676,6 +649,7 @@ if st.session_state["schedule_df_state"] is not None:
                             sched = initialize_schedule_hybrid(num_nurses, num_days_dynamic, requirements, is_fixed, fixed_shifts)
                             nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
                             
+                            # 오프 100% 매칭 버그 완치
                             row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days_dynamic, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i]) for i in range(num_nurses)]
                             col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups) for d in range(num_days_dynamic)]
                             total_penalty = sum(row_penalties) + sum(col_penalties)
