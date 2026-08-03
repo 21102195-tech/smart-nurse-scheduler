@@ -14,7 +14,7 @@ st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
 
 # ⭐ [프로그램 제목 및 부제목 업데이트]
 st.title("📊 스마트 널스 스케쥴러")
-st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 1.작성규칙, 2. 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_value=True)
+st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 1.작성규칙, 2. 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_allow_html=True)
 st.markdown("---")
 
 # 2. 세션 메모리 초기화
