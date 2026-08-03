@@ -5,84 +5,70 @@ import random
 import copy
 import io
 import re
+import os
+import json
 import requests
 from datetime import datetime
 
 # 1. 웹페이지 기본 설정
 st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
 
-# ⭐ [프로그램 제목 및 부제목 업데이트]
 st.title("📊 스마트 널스 스케쥴러")
 st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 1.작성규칙, 2. 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_allow_html=True)
 st.markdown("---")
 
-# 2. 세션 메모리 초기화
-if "schedule_df_state" not in st.session_state:
-    st.session_state["schedule_df_state"] = None
-if "optimized_result" not in st.session_state:
-    st.session_state["optimized_result"] = None
-
-# 구글 API 주소 연동
+# 구글 스프레드시트 API 주소 연동 (선생님의 진짜 주소 연동 완료!)
 GAS_URL = "https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"
 
-# ⭐ 실시간 동기화 정확성을 위해 캐시 장치를 완전히 삭제하여 100% 실시간성 보장!
-def fetch_google_sheet_data(url):
+# 구글 실시간 데이터 불러오기 함수
+def fetch_google_sheet_data():
     try:
-        # 캐싱 우회를 위한 랜덤 쿼리 결합
-        bust_url = f"{url}&t={random.random()}" if "?" in url else f"{url}?t={random.random()}"
-        response = requests.get(bust_url, timeout=8)
+        response = requests.get(GAS_URL, timeout=8)
         if response.status_code == 200:
             return response.json()
     except Exception as e:
         pass
     return []
 
-# 3. 사이드바 - 관리자 메뉴 및 업로드 버튼
-st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
-uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
-uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
-uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
+# ⭐ [서버 공유 설정값 로드 함수]
+# 사용자가 설정해둔 스위치 On/Off 및 슬라이더 값을 서버 하드디스크에서 자동으로 읽어옵니다.
+def load_shared_config():
+    default_config = {
+        "rule_5_consec_off": True, "rule_no_single_night": True, "rule_group_balance": True, "rule_night_after_2_off": True,
+        "limit_max_consec_work": 5, "limit_max_monthly_night": 6, "limit_max_consec_night": 3, "limit_daily_off_request": 2, "target_month": 8
+    }
+    if os.path.exists("config_shared.json"):
+        try:
+            with open("config_shared.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return default_config
 
-# ⭐ [지능형 가변 월 자동 감지 시스템]
-# 업로드된 파일명에서 숫자('8월', '9월')를 자동으로 감지해 기본값으로 활용합니다.
-detected_month = 8  # 기본 8월
-if uploaded_schedule:
-    match = re.search(r'(\d+)\s*월', uploaded_schedule.name)
-    if match:
-        detected_month = int(match.group(1))
+# ⭐ [서버 공유 설정값 저장 함수]
+# 수간호사가 설정을 바꿀 때마다 서버 하드디스크에 실시간 파일로 즉시 영구 저장합니다.
+def save_shared_config(config):
+    try:
+        with open("config_shared.json", "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=4)
+    except:
+        pass
+
+shared_config = load_shared_config()
+
+# 2. 세션 메모리 및 서버 하드디스크 연계 초기화 (접속 시 자동 파일 로드)
+if "schedule_df_state" not in st.session_state:
+    if os.path.exists("template_shared.xlsx"):
+        try:
+            st.session_state["schedule_df_state"] = pd.read_excel("template_shared.xlsx")
+        except:
+            st.session_state["schedule_df_state"] = None
     else:
-        match_digit = re.findall(r'\b(1[0-2]|[1-9])\b', uploaded_schedule.name)
-        if match_digit:
-            detected_month = int(match_digit[0])
+        st.session_state["schedule_df_state"] = None
 
-# 수간호사 선생님이 필요시 가변 조절할 수 있도록 사이드바에 월 선택 패널 구현
-target_month = st.sidebar.number_input("📅 스케줄 대상 월 설정", min_value=1, max_value=12, value=detected_month, step=1)
-
-# 🛠 [부서별 맞춤 근무 조건 설정]
-st.sidebar.markdown("---")
-st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
-
-# On/Off 토글 규칙들
-rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True)
-rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True)
-rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True)
-rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True)
-
-# 원하는 일수 슬라이더 조절 기능
-limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, 5)
-limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, 6)
-limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, 3)
-
-# ⭐ [허용 인원수 확장]: 하루 최대 오프 신청 한도 범위를 10명으로 확장 완료!
-limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 10, 2)
-
-# [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
-if uploaded_schedule:
-    file_key = f"{uploaded_schedule.name}_{uploaded_schedule.size}"
-    if "last_file_key" not in st.session_state or st.session_state["last_file_key"] != file_key:
-        st.session_state["last_file_key"] = file_key
-        st.session_state["schedule_df_state"] = None  
-        st.session_state["optimized_result"] = None   
+# 구글 시트 실시간 신청내역 자동 병합 상태 추적
+if "synced_once" not in st.session_state:
+    st.session_state["synced_once"] = False
 
 # [지능형 가변 이름 및 야간전담 판정 파서]
 def parse_nurse_row(name, group):
@@ -102,6 +88,60 @@ def parse_nurse_row(name, group):
         clean_name = clean_name[:-2]
         
     return clean_name, is_keeper
+
+# 최초 접속 시 구글 시트의 최신 원티드 신청 내용을 로드하여 자동 동기화 적용
+if st.session_state["schedule_df_state"] is not None and not st.session_state["synced_once"]:
+    sheet_data = fetch_google_sheet_data()
+    if len(sheet_data) > 0:
+        df_temp = st.session_state["schedule_df_state"].copy()
+        for item in sheet_data:
+            nurse_name = str(item['name']).strip()
+            wanted_val = str(item['wanted_off']).strip()
+            for idx, row in df_temp.iterrows():
+                nurse_id, _ = parse_nurse_row(row['이름'], row['그룹'])
+                if str(nurse_id) == nurse_name:
+                    df_temp.loc[idx, '원티드 오프'] = wanted_val
+                    break
+        st.session_state["schedule_df_state"] = df_temp
+    st.session_state["synced_once"] = True
+
+# 사이드바 - 관리자 메뉴 및 업로드 버튼
+st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
+uploaded_rules = st.sidebar.file_uploader("1. 작성 규칙 파일 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_schedule = st.sidebar.file_uploader("2. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
+uploaded_prev_month = st.sidebar.file_uploader("3. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
+
+# 🛠 [부서별 맞춤 근무 조건 설정 - 서버 저장 연동 완비]
+st.sidebar.markdown("---")
+st.sidebar.header("🛠️ 부서별 맞춤 근무 조건 설정")
+
+# 사용자가 화면에서 값을 바꾸면 서버 config 갱신
+rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=shared_config["rule_5_consec_off"])
+rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=shared_config["rule_no_single_night"])
+rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=shared_config["rule_group_balance"])
+rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=shared_config["rule_night_after_2_off"])
+
+limit_max_consec_work = st.sidebar.slider("최대 연속 근무 일수 제한", 0, 5, value=shared_config["limit_max_consec_work"])
+limit_max_monthly_night = st.sidebar.slider("월간 인당 최대 나이트(N) 개수", 0, 7, value=shared_config["limit_max_monthly_night"])
+limit_max_consec_night = st.sidebar.slider("최대 연속 나이트(N) 제한", 2, 3, value=shared_config["limit_max_consec_night"])
+limit_daily_off_request = st.sidebar.slider("📢 하루 최대 오프 신청 허용 인원", 1, 10, value=shared_config["limit_daily_off_request"])
+target_month = st.sidebar.number_input("📅 스케줄 대상 월 설정", min_value=1, max_value=12, value=shared_config["target_month"], step=1)
+
+# 설정을 변경하는 즉시 하드디스크 파일에 안전하게 자동 저장!
+current_config = {
+    "rule_5_consec_off": rule_5_consec_off, "rule_no_single_night": rule_no_single_night, "rule_group_balance": rule_group_balance, "rule_night_after_2_off": rule_night_after_2_off,
+    "limit_max_consec_work": limit_max_consec_work, "limit_max_monthly_night": limit_max_monthly_night, "limit_max_consec_night": limit_max_consec_night, "limit_daily_off_request": limit_daily_off_request, "target_month": target_month
+}
+if current_config != shared_config:
+    save_shared_config(current_config)
+
+# [새 파일 업로드 감지]
+if uploaded_schedule:
+    file_key = f"{uploaded_schedule.name}_{uploaded_schedule.size}"
+    if "last_file_key" not in st.session_state or st.session_state["last_file_key"] != file_key:
+        st.session_state["last_file_key"] = file_key
+        st.session_state["schedule_df_state"] = None  
+        st.session_state["optimized_result"] = None   
 
 # [보정 함수] 헤더 밀림 방지 보정
 def load_and_align_headers(df):
@@ -329,21 +369,18 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
                 pool_idx += 1
     return sched
 
-# ⚙️ 수간호사 신규 업로드 시 세션 상태 등록 및 서버 디스크 영구 백업 기능
+# 수간호사 신규 파일 등록 및 서버 하드디스크 영구 동기화
 if uploaded_schedule:
     try:
-        if uploaded_schedule.name.endswith('xlsx'):
-            raw_df = pd.read_excel(uploaded_schedule)
-        else:
-            raw_df = pd.read_csv(uploaded_schedule, encoding='utf-8-sig')
+        raw_df = pd.read_excel(uploaded_schedule) if uploaded_schedule.name.endswith('xlsx') else pd.read_csv(uploaded_schedule, encoding='utf-8-sig')
         schedule_df = load_and_align_headers(raw_df)
         
-        # 1. 서버 하드디스크에 영구 고정 저장 (절대 유실되지 않음!)
+        # 1. 가상 서버 하드디스크에 파일 저장 (실시간 동기화 완료!)
         schedule_df.to_excel("template_shared.xlsx", index=False)
         st.session_state["schedule_df_state"] = schedule_df
         
         # 2. 구글 스프레드시트에 최초 업로드된 간호사 명단을 가입 처리
-        sheet_data = fetch_google_sheet_data(GAS_URL)
+        sheet_data = fetch_google_sheet_data()
         existing_names = [str(item['name']).strip() for item in sheet_data] if sheet_data else []
         
         for idx, row in schedule_df.iterrows():
@@ -355,6 +392,7 @@ if uploaded_schedule:
         st.sidebar.error(f"템플릿 파일 읽기 에러: {e}")
 
 # 5. 메인 인터페이스부
+# (이제 서버 디스크 공유 스토리지가 가동되므로 다른 간호사들이 언제 어디서든 접속해도 간호사 이름 목록이 무조건 보존됩니다!)
 if st.session_state["schedule_df_state"] is not None:
     menu = st.radio("👉 사용 유형을 선택하세요", ["🙋‍♀️ [간호사용] 원티드 오프 신청", "⚙️ [수간호사용] 관리자 제어판"], horizontal=True)
     
@@ -364,12 +402,10 @@ if st.session_state["schedule_df_state"] is not None:
         st.write(f"### 📅 {target_month}월 원하는 휴무일 직접 신청")
         st.info("💡 원하는 휴가 날짜를 지정하고 신청을 완료하면, 구글 스프레드시트에 신청 시간과 함께 실시간 저장됩니다.")
         
-        # 서버 디스크에서 템플릿 읽기
         df_temp = st.session_state["schedule_df_state"].copy()
-        sheet_data = fetch_google_sheet_data(GAS_URL)
+        sheet_data = fetch_google_sheet_data()
         
-        # ⭐ [지능형 달의 일수 자동 계산 시스템]
-        # 업로드된 템플릿에서 '1'부터 '31'까지 중 가장 큰 숫자열을 찾아 해당 달의 진짜 일수(num_days)를 동적으로 판정합니다!
+        # 템플릿의 숫자 열 개수를 파악하여 30일/31일 자동 감지
         day_cols_detected = [int(col) for col in df_temp.columns if str(col).strip().isdigit()]
         num_days_dynamic = max(day_cols_detected) if day_cols_detected else 31
         
@@ -392,8 +428,6 @@ if st.session_state["schedule_df_state"] is not None:
                         
         st.write(f"#### 📢 {target_month}월 일자별 오프 신청 현황 및 마감 잔여석 (하루 최대 {limit_daily_off_request}명 제한)")
         cols = st.columns(10)
-        
-        # ⭐ 동적으로 계산된 해당 월의 일수(num_days_dynamic)만큼만 달력 버튼을 출력합니다!
         for day in range(1, num_days_dynamic + 1):
             col_idx = (day - 1) % 10
             count = day_request_counts.get(day, 0)
@@ -416,7 +450,6 @@ if st.session_state["schedule_df_state"] is not None:
             if len(selected_offs) > 0:
                 closed_days = []
                 for d in selected_offs:
-                    # 타인 신청 인원수 구글 시트에서 즉시 계산
                     other_count = sum(1 for item in sheet_data if d in [int(re.search(r'^\s*(\d+)', x.strip()).group(1)) for x in str(item['wanted_off']).split(',') if re.search(r'^\s*(\d+)', x.strip())] and str(item['name']).strip() != str(selected_nurse))
                     if other_count >= limit_daily_off_request:
                         closed_days.append(d)
@@ -456,12 +489,11 @@ if st.session_state["schedule_df_state"] is not None:
             with col_tab1:
                 st.write(f"### 📋 현재 구글 시트에 취합된 실시간 오프 현황 ({target_month}월 스케줄)")
                 
-                # 수동 새로고침 클릭 시 완벽 동기화
                 if st.button("🔄 새로운 신청 내역 실시간 동기화"):
                     st.session_state["optimized_result"] = None
                     st.rerun()
                     
-                sheet_data = fetch_google_sheet_data(GAS_URL)
+                sheet_data = fetch_google_sheet_data()
                 df_temp = st.session_state["schedule_df_state"].copy()
                 
                 # 구글 시트 데이터를 로컬 뷰에 실시간 덮어쓰기
@@ -496,7 +528,6 @@ if st.session_state["schedule_df_state"] is not None:
                                     prev_df = pd.read_excel(uploaded_prev_month) if uploaded_prev_month.name.endswith('xlsx') else pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
                                 except: pass
                             
-                            # ⭐ [지능형 달의 일수 자동 감지]
                             day_cols_detected = [int(col) for col in df_clean.columns if str(col).strip().isdigit()]
                             num_days_dynamic = max(day_cols_detected) if day_cols_detected else 31
                             
@@ -611,6 +642,7 @@ if st.session_state["schedule_df_state"] is not None:
                             sched = initialize_schedule_hybrid(num_nurses, num_days_dynamic, requirements, is_fixed, fixed_shifts)
                             nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
                             
+                            # ⭐ [오프 100% 매칭 버그 완치]: is_fixed[i]를 전달하여 고정값과 원티드 간의 충돌 우회를 완벽 연동합니다.
                             row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days_dynamic, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i]) for i in range(num_nurses)]
                             col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups) for d in range(num_days_dynamic)]
                             total_penalty = sum(row_penalties) + sum(col_penalties)
