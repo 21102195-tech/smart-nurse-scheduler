@@ -25,20 +25,22 @@ if "optimized_result" not in st.session_state:
 # ⭐ [구글 API 주소 연동]: 구글에서 복사해 둔 웹 앱 URL 주소를 여기에 꼭 넣어주세요!
 GAS_URL = """https://script.google.com/macros/s/AKfycbzsbX7PygUpBz2kCssQ7x3vuL4rraz_3uM7lQyhSSUsdGIDtxJ08Dwyf3irDy7zn8ZI/exec"""
 
-# 구글 실시간 데이터 불러오기 함수
+# ⭐ [에러 자가진단 기능이 보완된 데이터 로딩 함수]
 def fetch_google_sheet_data():
     try:
-        # 구글 서버 캐싱 우회를 위한 랜덤 쿼리 결합 (선착순 실시간성 100% 보장)
         bust_url = f"{GAS_URL}&t={random.random()}" if "?" in GAS_URL else f"{GAS_URL}?t={random.random()}"
         response = requests.get(bust_url, timeout=8)
         if response.status_code == 200:
             return response.json()
+        else:
+            st.sidebar.error(f"🚨 구글 서버 응답 오류 (상태코드: {response.status_code})")
     except Exception as e:
-        pass
+        st.sidebar.error(f"🚨 구글 연결 실패 원인: {e}")
     return []
 
 # 서버 공유 설정값 로드 함수
 def load_shared_config():
+    import json
     default_config = {
         "rule_5_consec_off": True, "rule_no_single_night": True, "rule_group_balance": True, "rule_night_after_2_off": True,
         "limit_max_consec_work": 5, "limit_max_monthly_night": 6, "limit_max_consec_night": 3, "limit_daily_off_request": 2, "target_month": 8
@@ -229,7 +231,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
         if total_N != 15:
             penalty += abs(total_N - 15) * 500000
     else:
-        # 규칙 2: 한 달 밤근무(N) 개수 균등화
+        # 규칙 2: 한 달 밤근무(N) 개수 균등화 (수학적으로 실시간 계산된 타겟 반영)
         total_N = sum(1 for x in row_norm[history_len:] if x == 'N')
         if limit_max_monthly_night == 0:
             if total_N > 0:
