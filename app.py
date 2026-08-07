@@ -7,10 +7,12 @@ import io
 import re
 
 # 1. 웹페이지 기본 설정
-st.set_page_config(page_title="간호사 스마트 3교대 스케줄러", layout="wide")
+st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
 
-st.title("🏥 3교대 간호사 스마트 근무표 작성 & 신청 시스템")
-st.subheader("고정 근무(D/E/N/DE/교육) 잠금 및 교육 근무의 D 근무 치환 규칙이 완벽히 반영되었습니다.")
+# ⭐ [프로그램 제목 및 설명 부제목 적용]
+st.title("📊 스마트 널스 스케쥴러")
+st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 1.작성규칙, 2. 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_allow_html=True)
+st.markdown("---")
 
 # 2. 세션 메모리 초기화
 if "schedule_df_state" not in st.session_state:
@@ -212,11 +214,11 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                     penalty += 500000
                 if shift == 'N' and next_shift in ['D', 'E', 'DE']:
                     penalty += 500000
-                # ⭐ [신규 규칙]: DE 근무 다음날 D 근무 금지 (교육 포함)
+                # [신규 규칙]: DE 근무 다음날 D 근무 금지
                 if shift == 'DE' and next_shift == 'D':
                     penalty += 500000
                     
-        # ⭐ [신규 규칙]: E -> OFF -> D 근무 금지 (교육 포함)
+        # [신규 규칙]: E -> OFF -> D 근무 금지
         if d < num_total - 2:
             next_shift = row_norm[d+1]
             day_after_next = row_norm[d+2]
@@ -282,7 +284,7 @@ def get_day_penalty(col, num_nurses, nurse_groups):
             
     return penalty
 
-# ⭐ [DE 및 교육 지원 강화] 하이브리드 고정형 초기 스케줄 생성 함수
+# 하이브리드 고정형 초기 스케줄 생성 함수
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts):
     sched = np.empty((num_nurses, num_days), dtype=object)
     for d in range(num_days):
@@ -291,7 +293,6 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
         nN = requirements['N'][d]
         nDE = requirements['DE'][d] if 'DE' in requirements else 0
         
-        # 고정값 합산
         pD = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'D')
         pE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'E')
         pN = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'N')
@@ -436,7 +437,7 @@ if st.session_state["schedule_df_state"] is not None:
                             is_night_keepers.append(is_keeper)
                             nurse_histories.append(history)
                             
-                    # ⭐ 3. 요구 인원수 파싱 (D, E, N에 추가로 DE 듀티 요구량까지 동적 추적!)
+                    # 3. 요구 인원수 파싱 (D, E, N, DE)
                     requirements = {}
                     default_values = {
                         'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
@@ -453,7 +454,6 @@ if st.session_state["schedule_df_state"] is not None:
                             break
                             
                     if start_idx is not None:
-                        # D, E, N, DE까지 탐색하기 위해 행 범위를 4로 확장
                         for i in range(4):
                             if start_idx + i < len(df_clean):
                                 row = df_clean.iloc[start_idx + i]
@@ -529,7 +529,7 @@ if st.session_state["schedule_df_state"] is not None:
                     target_N_max = min(target_N_max, limit_max_monthly_night)
                     target_N_min = min(target_N_min, target_N_max)
                     
-                    # 4. 사용자가 수동으로 채워둔 고정 근무의 위치(Lock Mask) 식별 및 한글/교육 예외처리
+                    # 4. ⭐ [지정 번표 잠금 강화]: 사용자가 수동으로 채워둔 고정 근무의 위치(Lock Mask) 식별 및 한글/교육 예외처리
                     is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                     fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
                     
@@ -548,6 +548,7 @@ if st.session_state["schedule_df_state"] is not None:
                             elif raw_val in ['OFF', '오프', '휴무', '휴']: val = 'OFF'
                             elif '교육' in raw_val: val = '교육' # 교육 근무 탐지 및 잠금
                             
+                            # ⭐ D, E, N, DE, 교육, OFF 등 수동 지정된 모든 형태의 근무를 완벽하게 고정(Lock) 처리합니다!
                             if val in ['D', 'E', 'N', 'DE', 'OFF', '교육']:
                                 is_fixed[i, d] = True
                                 fixed_shifts[i, d] = val
@@ -575,7 +576,7 @@ if st.session_state["schedule_df_state"] is not None:
                         while i1 == i2:
                             i2 = random.randint(0, num_nurses - 1)
                             
-                        # ⭐ 고정 근무는 Swap(교환) 과정에서 절대 제외되어 그대로 고정 유지됩니다!
+                        # ⭐ [고정 근무 보호]: 고정된 자리가 하나라도 있다면 교환(Swap)에서 완벽히 패스합니다!
                         if is_fixed[i1, d] or is_fixed[i2, d]:
                             continue
                             
