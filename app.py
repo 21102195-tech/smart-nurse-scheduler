@@ -292,7 +292,7 @@ def get_day_penalty(col, num_nurses, nurse_groups, unique_groups):
         
     return penalty
 
-# ⭐ [DE 및 교육 지원 강화] 하이브리드 고정형 초기 스케줄 생성 함수
+# 하이브리드 고정형 초기 스케줄 생성 함수
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts):
     sched = np.empty((num_nurses, num_days), dtype=object)
     for d in range(num_days):
@@ -318,6 +318,13 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
         rem_OFF = max(0, num_unfixed - rem_D - rem_E - rem_N - rem_DE)
         
         pool = ['D'] * rem_D + ['E'] * rem_E + ['N'] * rem_N + ['DE'] * rem_DE + ['OFF'] * rem_OFF
+        
+        # 수학적 오차 방쇄: 남은 자리가 부족하더라도 OFF를 대입해 요구 근무 수치를 100% 무조건 보존합니다.
+        if len(pool) < num_unfixed:
+            pool += ['OFF'] * (num_unfixed - len(pool))
+        else:
+            pool = pool[:num_unfixed]
+            
         random.shuffle(pool)
         
         pool_idx = 0
@@ -446,7 +453,7 @@ if st.session_state["schedule_df_state"] is not None:
                             is_night_keepers.append(is_keeper)
                             nurse_histories.append(history)
                             
-                    # 3. 요구 인원수 파싱 (D, E, N에 추가로 DE 듀티 요구량까지 동적 추적!)
+                    # ⭐ 3. 요구 인원수 파싱 (D, E, N에 추가로 DE 듀티 요구량까지 동적 추적!)
                     requirements = {}
                     default_values = {
                         'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
@@ -570,6 +577,41 @@ if st.session_state["schedule_df_state"] is not None:
                                 if val in ['D', 'E', 'N', 'DE', 'OFF', '교육']:
                                     is_fixed[i, d] = True
                                     fixed_shifts[i, d] = val
+                    
+                    # ⭐ [하루 근무인원 필수 확보 방어책]: 고정된 OFF가 너무 많아 하루 듀티별 인력수(D, E, N, DE)가 부족한 날이 있다면,
+                    # 일반 간호사 중 수동 고정된 OFF를 자동으로 해제하여 요구 인원을 100% 충족하도록 방어합니다!
+                    for d in range(num_days):
+                        nD_req = requirements['D'][d]
+                        nE_req = requirements['E'][d]
+                        nN_req = requirements['N'][d]
+                        nDE_req = requirements['DE'][d] if 'DE' in requirements else 0
+                        
+                        pD = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'D')
+                        pE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'E')
+                        pN = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'N')
+                        pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
+                        pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
+                        
+                        rem_D = max(0, nD_req - pD - pEDU)
+                        rem_E = max(0, nE_req - pE)
+                        rem_N = max(0, nN_req - pN)
+                        rem_DE = max(0, nDE_req - pDE)
+                        
+                        required_working_slots = rem_D + rem_E + rem_N + rem_DE
+                        num_unfixed = sum(1 for i in range(num_nurses) if not is_fixed[i, d])
+                        
+                        # 인력 부족 사태 발생 시
+                        if num_unfixed < required_working_slots:
+                            deficit = required_working_slots - num_unfixed
+                            unlocked_count = 0
+                            # 수동 고정된 일반 OFF 중 필요한 개수만큼만 잠금을 풀어 자리를 확보합니다.
+                            for i in range(num_nurses):
+                                if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
+                                    is_fixed[i, d] = False
+                                    fixed_shifts[i, d] = None
+                                    unlocked_count += 1
+                                    if unlocked_count >= deficit:
+                                        break
                     
                     # 5. 하이브리드 고정 스케줄 초기화
                     sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts)
