@@ -20,7 +20,7 @@ if "schedule_df_state" not in st.session_state:
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
 
-# ⭐ 3. 사이드바 - 관리자 메뉴 및 업로드 버튼 (규칙 업로드 완전히 제거!)
+# 3. 사이드바 - 관리자 메뉴 및 업로드 버튼
 st.sidebar.header("⚙️ 수간호사 관리자 메뉴")
 uploaded_schedule = st.sidebar.file_uploader("1. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
 uploaded_prev_month = st.sidebar.file_uploader("2. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
@@ -154,7 +154,6 @@ def extract_nurse_history(prev_df, nurse_name):
 
 # 벌점 계산 수식 정의
 def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row, allowed_shifts_set):
-    # ⭐ [교육 근무의 D 치환]: 연속 근무 및 교대 금지 규칙을 위해 교육 근무를 D로 치환한 가상 근무 행을 생성합니다.
     row_norm = []
     for x in (list(history) + list(row_current)):
         if x == '교육':
@@ -261,15 +260,15 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 if shift == 'N' and next_shift == 'OFF' and day_after_next == 'D':
                     penalty += 500000
                 
-        # [조건 On/Off] 야간 근무(N) 후 2일 OFF 필수 부여
+        # ⭐ [조건 On/Off]: 야간 근무(N) 후 2일 OFF 필수 부여 (어길 시 탈락 수준 2,000,000점 초고가 벌점 부여해 완벽 강제!)
         if shift == 'N' and rule_night_after_2_off:
             if d < num_total - 1:
                 if row_norm[d+1] != 'N':
                     if row_norm[d+1] != 'OFF' and (d+1) >= history_len:
-                        penalty += 500000
+                        penalty += 2000000
                     if d < num_total - 2:
                         if row_norm[d+2] != 'OFF' and (d+2) >= history_len:
-                            penalty += 500000
+                            penalty += 2000000
                             
         if d <= num_total - 5:
             pat = list(row_norm[d:d+5])
@@ -522,14 +521,14 @@ if st.session_state["schedule_df_state"] is not None:
                             row = df_clean.iloc[start_idx + i]
                             duty = None
                             for col in df_clean.columns:
-                                if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
+                                if str(col).strip() not in [str(d) for d in range(1, 32)]:
                                     val_str = str(row[col]).strip().upper()
                                     if val_str in ['D', 'E', 'N', 'DE']:
                                         duty = val_str
                                         break
                             if duty:
                                 day_values = []
-                                for d in range(1, num_days_dynamic + 1):
+                                for d in range(1, 32):
                                     col_name = None
                                     for col in df_clean.columns:
                                         if str(col).strip().replace('.0', '') == str(d):
@@ -660,13 +659,13 @@ if st.session_state["schedule_df_state"] is not None:
                                 if unlocked_count >= deficit:
                                     break
                 
-                # 5. 하이브리드 고정 스케줄 초기화
+                # 5. 하이브리드 고정 스케줄 초기화 (수정 완료!)
                 sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts, is_night_keepers)
                 
                 # 벌점 계산기 함수 호출
                 row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i], allowed_shifts_list[i]) for i in range(num_nurses)]
                 
-                # ⭐ [가변 그룹 자동 균등 배치 연동]: 고정된 unique_groups 배열을 계산하여 연산에 산입합니다.
+                # [가변 그룹 자동 균등 배치 연동]
                 unique_groups = sorted(list(set(nurse_groups)))
                 col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups, unique_groups) for d in range(num_days)]
                 
