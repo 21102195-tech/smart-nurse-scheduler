@@ -9,7 +9,7 @@ import re
 # 1. 웹페이지 기본 설정
 st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
 
-# ⭐ [프로그램 제목 및 설명 부제목 적용 완료]
+# 프로그램 제목 및 설명 부제목 적용 완료
 st.title("📊 스마트 널스 스케쥴러")
 st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_allow_html=True)
 st.markdown("---")
@@ -165,46 +165,49 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
     history_len = len(history)
     
     penalty = 0
+    # ⭐ [천만 점 고정 하드 벌점 상수 정의]
+    HARD_PENALTY = 10000000
+    
     # 규칙 1: 원티드 오프 준수
     for d in range(history_len, num_total):
         current_day = d - history_len + 1
         if current_day in nurse_wanted_off_set and row_norm[d] != 'OFF':
             if not is_fixed_row[current_day - 1]:
-                penalty += 1000000
+                penalty += HARD_PENALTY
                 
     # 규칙 2: 간호사별 허용 근무코드 필터링
     for d in range(history_len, num_total):
         shift = row_norm[d]
         if shift not in allowed_shifts_set:
-            penalty += 1000000
+            penalty += HARD_PENALTY
             
     if is_night_keeper:
         for d in range(history_len, num_total):
             if row_norm[d] in ['D', 'E', 'DE']:
-                penalty += 1000000
+                penalty += HARD_PENALTY
         total_N = sum(1 for x in row_norm[history_len:] if x == 'N')
         if total_N != 15:
-            penalty += abs(total_N - 15) * 500000
+            penalty += abs(total_N - 15) * HARD_PENALTY
     else:
-        # 규칙 2: 한 달 밤근무(N) 개수 균등화
+        # 규칙 3: 한 달 밤근무(N) 개수 균등화
         total_N = sum(1 for x in row_norm[history_len:] if x == 'N')
         if limit_max_monthly_night == 0:
             if total_N > 0:
-                penalty += total_N * 1000000
+                penalty += total_N * HARD_PENALTY
         else:
             if total_N < target_N_min or total_N > target_N_max:
                 mid = (target_N_min + target_N_max) / 2.0
                 half_w = (target_N_max - target_N_min) / 2.0
-                penalty += (abs(total_N - mid) - half_w) * 500000
+                penalty += (abs(total_N - mid) - half_w) * HARD_PENALTY
             
-        # 규칙 3: 한 달 총 휴무(OFF) 개수 자동 조정
+        # 규칙 4: 한 달 총 휴무(OFF) 개수 자동 조정
         total_OFF = sum(1 for x in row_norm[history_len:] if x == 'OFF')
         if total_OFF < target_OFF_min or total_OFF > target_OFF_max:
             mid = (target_OFF_min + target_OFF_max) / 2.0
             half_w = (target_OFF_max - target_OFF_min) / 2.0
-            penalty += (abs(total_OFF - mid) - half_w) * 400000
+            penalty += (abs(total_OFF - mid) - half_w) * HARD_PENALTY
             
-        # [근무 다양성 보장 규칙]
+        # [근무 다양성 보장 규칙] - 소프트 제한
         total_D = sum(1 for x in row_norm[history_len:] if x in ['D', '교육'])
         total_E = sum(1 for x in row_norm[history_len:] if x in ['E', 'DE'])
         if 'D' in allowed_shifts_set and total_D < 3:
@@ -220,20 +223,20 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
             consec_work += 1
             if limit_max_consec_work > 0:
                 if consec_work > limit_max_consec_work and d >= history_len:
-                    penalty += (consec_work - limit_max_consec_work) * 500000
+                    penalty += (consec_work - limit_max_consec_work) * HARD_PENALTY
         else:
             # [조건 On/Off] 5일 연속 근무 후 2 OFF 연속 보장
             if rule_5_consec_off:
                 if consec_work == 5:
                     if d + 1 < num_total:
                         if row_norm[d+1] != 'OFF' and (d+1) >= history_len:
-                            penalty += 300000
+                            penalty += HARD_PENALTY
             consec_work = 0
             
         if shift == 'N':
             consec_N += 1
             if consec_N > limit_max_consec_night and d >= history_len:  
-                penalty += (consec_N - limit_max_consec_night) * 500000
+                penalty += (consec_N - limit_max_consec_night) * HARD_PENALTY
         else:
             consec_N = 0
             
@@ -242,12 +245,12 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
             next_shift = row_norm[d+1]
             if (d+1) >= history_len:
                 if shift == 'E' and next_shift in ['D', 'DE']:
-                    penalty += 500000
+                    penalty += HARD_PENALTY
                 if shift == 'N' and next_shift in ['D', 'E', 'DE']:
-                    penalty += 500000
+                    penalty += HARD_PENALTY
                 # [신규 규칙]: DE 근무 다음날 D 근무 금지 (교육 포함)
                 if shift == 'DE' and next_shift == 'D':
-                    penalty += 500000
+                    penalty += HARD_PENALTY
                     
         # [신규 규칙]: E -> OFF -> D 근무 금지 (교육 포함)
         if d < num_total - 2:
@@ -255,26 +258,26 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
             day_after_next = row_norm[d+2]
             if (d+2) >= history_len:
                 if shift == 'E' and next_shift == 'OFF' and day_after_next == 'D':
-                    penalty += 500000
+                    penalty += HARD_PENALTY
                 # [신규 규칙] N ➡️ OFF ➡️ D 근무 금지
                 if shift == 'N' and next_shift == 'OFF' and day_after_next == 'D':
-                    penalty += 500000
+                    penalty += HARD_PENALTY
                 
-        # ⭐ [조건 On/Off]: 야간 근무(N) 후 2일 OFF 필수 부여 (어길 시 탈락 수준 2,000,000점 초고가 벌점 부여해 완벽 강제!)
+        # [조건 On/Off] 야간 근무(N) 후 2일 OFF 필수 부여
         if shift == 'N' and rule_night_after_2_off:
             if d < num_total - 1:
                 if row_norm[d+1] != 'N':
                     if row_norm[d+1] != 'OFF' and (d+1) >= history_len:
-                        penalty += 2000000
+                        penalty += HARD_PENALTY
                     if d < num_total - 2:
                         if row_norm[d+2] != 'OFF' and (d+2) >= history_len:
-                            penalty += 2000000
+                            penalty += HARD_PENALTY
                             
         if d <= num_total - 5:
             pat = list(row_norm[d:d+5])
             if (d+4) >= history_len:
                 if pat in forbidden_5_patterns:
-                    penalty += 500000
+                    penalty += HARD_PENALTY
                 
     # [조건 On/Off] 단독 나이트 방지
     if rule_no_single_night:
@@ -585,8 +588,7 @@ if st.session_state["schedule_df_state"] is not None:
                     target_OFF_min = int(avg_normal_OFF)
                     target_OFF_max = int(avg_normal_OFF) + 1 if avg_normal_OFF % 1 != 0 else int(avg_normal_OFF)
                 else:
-                    target_N_min, target_N_max = 0, 0
-                    target_OFF_min, target_OFF_max = 0, 0
+                    target_N_min, target_N_max, target_OFF_min, target_OFF_max = 0, 0, 0, 0
                 
                 target_N_max = min(target_N_max, limit_max_monthly_night)
                 target_N_min = min(target_N_min, target_N_max)
@@ -659,7 +661,7 @@ if st.session_state["schedule_df_state"] is not None:
                                 if unlocked_count >= deficit:
                                     break
                 
-                # 5. 하이브리드 고정 스케줄 초기화 (수정 완료!)
+                # 5. 하이브리드 고정 스케줄 초기화
                 sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts, is_night_keepers)
                 
                 # 벌점 계산기 함수 호출
