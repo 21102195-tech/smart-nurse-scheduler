@@ -1,4 +1,4 @@
-import streamlit st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import random
@@ -292,7 +292,7 @@ def get_day_penalty(col, num_nurses, nurse_groups, unique_groups):
         
     return penalty
 
-# ⭐ [수학적 인원 규칙 100% 만족형] 하이브리드 고정형 초기 스케줄 생성 함수
+# ⭐ [DE 및 교육 지원 강화] 하이브리드 고정형 초기 스케줄 생성 함수
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts):
     sched = np.empty((num_nurses, num_days), dtype=object)
     for d in range(num_days):
@@ -315,14 +315,9 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
         rem_DE = max(0, nDE - pDE)
         
         num_unfixed = sum(1 for i in range(num_nurses) if not is_fixed[i, d])
+        rem_OFF = max(0, num_unfixed - rem_D - rem_E - rem_N - rem_DE)
         
-        # ⭐ [오차 원천 방쇄]: 요구 잔여 근무량만큼만 주머니(Pool)에 정확히 담아 섞음으로써, 초과나 부족이 절대 발생하지 않습니다.
-        pool = ['D'] * rem_D + ['E'] * rem_E + ['N'] * rem_N + ['DE'] * rem_DE
-        if len(pool) < num_unfixed:
-            pool += ['OFF'] * (num_unfixed - len(pool))
-        else:
-            pool = pool[:num_unfixed]
-            
+        pool = ['D'] * rem_D + ['E'] * rem_E + ['N'] * rem_N + ['DE'] * rem_DE + ['OFF'] * rem_OFF
         random.shuffle(pool)
         
         pool_idx = 0
@@ -451,7 +446,7 @@ if st.session_state["schedule_df_state"] is not None:
                             is_night_keepers.append(is_keeper)
                             nurse_histories.append(history)
                             
-                    # ⭐ 3. 요구 인원수 파싱 (D, E, N에 추가로 DE 듀티 요구량까지 동적 추적!)
+                    # 3. 요구 인원수 파싱 (D, E, N에 추가로 DE 듀티 요구량까지 동적 추적!)
                     requirements = {}
                     default_values = {
                         'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
