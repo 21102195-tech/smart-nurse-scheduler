@@ -79,11 +79,10 @@ def parse_nurse_row(name, group):
         
     return clean_name, is_keeper
 
-# ⭐ [지능형 가변 근무코드 추출 파서]
-# 엑셀에 적힌 "D, E" 또는 "데이, 이브닝" 등의 텍스트를 컴퓨터용 근무 코드로 정제합니다.
+# [지능형 가변 근무코드 추출 파서]
 def parse_allowed_shifts(val):
     if pd.isna(val) or str(val).strip() in ["", "-", "전체", "nan"]:
-        return {"D", "E", "N", "DE", "OFF", "교육"}  # 비어있으면 모든 근무 가능
+        return {"D", "E", "N", "DE", "OFF", "교육"}
         
     val_str = str(val).strip().upper()
     tokens = re.split(r'[,/\s]+', val_str)
@@ -96,7 +95,7 @@ def parse_allowed_shifts(val):
         elif t in ['OFF', '오프', '휴무', '휴']: allowed.add('OFF')
         elif t in ['교육', 'EDU']: allowed.add('교육')
         
-    allowed.add('OFF')  # 어떠한 경우라도 휴무(OFF)는 무조건 기본 허용합니다.
+    allowed.add('OFF')
     return allowed
 
 # [보정 함수] 헤더 밀림 방지 보정
@@ -173,11 +172,11 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
             if not is_fixed_row[current_day - 1]:
                 penalty += 1000000
                 
-    # ⭐ [규칙 2: 간호사별 허용 근무코드 필터링]: 한 달 배정된 근무 중 허용되지 않는 근무 형태가 배정되었다면 탈락급 무거운 벌점 부여!
+    # 규칙 2: 간호사별 허용 근무코드 필터링
     for d in range(history_len, num_total):
         shift = row_norm[d]
         if shift not in allowed_shifts_set:
-            penalty += 1000000 # 허용되지 않은 근무 배정 차단
+            penalty += 1000000
             
     if is_night_keeper:
         for d in range(history_len, num_total):
@@ -206,7 +205,6 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
             penalty += (abs(total_OFF - mid) - half_w) * 400000
             
         # [근무 다양성 보장 규칙]
-        # 허용 근무 목록에 해당 근무가 포함되어 있을 때만 다양성 규칙을 계산하여 무리한 벌점 충돌을 자동 방지합니다!
         total_D = sum(1 for x in row_norm[history_len:] if x in ['D', '교육'])
         total_E = sum(1 for x in row_norm[history_len:] if x in ['E', 'DE'])
         if 'D' in allowed_shifts_set and total_D < 3:
@@ -251,12 +249,15 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 if shift == 'DE' and next_shift == 'D':
                     penalty += 500000
                     
-        # [신규 규칙]: E -> OFF -> D 근무 금지 (교육 포함)
+        # ⭐ [신규 규칙] E ➡️ OFF ➡️ D 근무 금지 (교육 포함)
         if d < num_total - 2:
             next_shift = row_norm[d+1]
             day_after_next = row_norm[d+2]
             if (d+2) >= history_len:
                 if shift == 'E' and next_shift == 'OFF' and day_after_next == 'D':
+                    penalty += 500000
+                # ⭐ [신규 규칙] N ➡️ OFF ➡️ D 근무 금지 (야간근무 후 데이 차단!)
+                if shift == 'N' and next_shift == 'OFF' and day_after_next == 'D':
                     penalty += 500000
                 
         # [조건 On/Off] 야간 근무(N) 후 2일 OFF 필수 부여
@@ -331,12 +332,14 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
         nN = requirements['N'][d]
         nDE = requirements['DE'][d] if 'DE' in requirements else 0
         
+        # 고정값 합산
         pD = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'D')
         pE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'E')
         pN = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'N')
         pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
         pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
         
+        # 교육(EDU)은 D 근무 인력으로 인정하여 D의 잔여 배치량(rem_D) 계산 시 차감 보정합니다!
         rem_D = max(0, nD - pD - pEDU)
         rem_E = max(0, nE - pE)
         rem_N = max(0, nN - pN)
@@ -430,184 +433,188 @@ if st.session_state["schedule_df_state"] is not None:
         max_iter = st.slider("최대 탐색 횟수 (탐색 횟수가 높을수록 정밀해집니다)", 10000, 150000, 60000, step=10000)
         
         if st.button("🔮 최종 AI 근무표 생성 시작", type="primary"):
-            with st.spinner("야간전담 분류 및 이전 달 근태 연동 연산 중..."):
-                df_clean = st.session_state["schedule_df_state"].copy()
-                df_clean = df_clean.replace(r'^\s*$', np.nan, regex=True)
-                df_clean['그룹'] = df_clean['그룹'].ffill()
-                
-                # 1. 이전 달 근무 데이터 로드 처리
-                prev_df = None
-                if uploaded_prev_month is not None:
-                    try:
-                        if uploaded_prev_month.name.endswith('xlsx'):
-                            prev_df = pd.read_excel(uploaded_prev_month)
-                        else:
-                            prev_df = pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
-                    except Exception as e:
-                        st.warning(f"경고: 이전 달 근무표를 파싱하는 과정에서 오류가 발생했습니다. 이전 달 근무 연동 없이 연산을 시작합니다. (오류내용: {e})")
-                
-                # 2. 간호사 추출 및 야간전담 분류 + 이전달 근무 기록 매핑
-                nurses = []
-                is_night_keepers = []
-                nurse_histories = []
-                allowed_shifts_list = [] # 간호사별 허용된 근무코드 저장 리스트
-                
-                # 템플릿에 '가능 근무' 컬럼이 존재하는지 가변적으로 자동 감지
-                allowed_col = '가능 근무' if '가능 근무' in df_clean.columns else ('가능근무' if '가능근무' in df_clean.columns else None)
-                
-                for idx, row in df_clean.iterrows():
-                    name = row['이름']
-                    group = row['그룹']
-                    nurse_id, is_keeper = parse_nurse_row(name, group)
+            if uploaded_rules is None:
+                st.error("에러: 규칙 파일을 먼저 사이드바에 업로드해 주세요.")
+            else:
+                with st.spinner("야간전담 분류 및 이전 달 근태 연동 연산 중..."):
+                    df_clean = st.session_state["schedule_df_state"].copy()
+                    df_clean = df_clean.replace(r'^\s*$', np.nan, regex=True)
+                    df_clean['그룹'] = df_clean['그룹'].ffill()
                     
-                    if nurse_id is not None:
-                        wanted = row['원티드 오프']
-                        wanted_days = []
-                        if pd.notna(wanted) and str(wanted).strip() != '-':
-                            wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
-                        
-                        # 이전 달 근무 내역 추출
-                        history = extract_nurse_history(prev_df, nurse_id) if prev_df is not None else ['OFF'] * 7
-                        
-                        # ⭐ [간호사별 가능 근무 파싱]: 지정 컬럼에서 듀티 리스트 세트를 추출해 저장합니다.
-                        allowed = parse_allowed_shifts(row[allowed_col]) if allowed_col is not None else {"D", "E", "N", "DE", "OFF", "교육"}
-                        
-                        nurses.append({
-                            'id': nurse_id,
-                            'group': row['그룹'],
-                            'wanted_off': wanted_days,
-                            'row_idx': idx,
-                            'is_keeper': is_keeper
-                        })
-                        is_night_keepers.append(is_keeper)
-                        nurse_histories.append(history)
-                        allowed_shifts_list.append(allowed)
-                        
-                # 요구량 파싱
-                requirements = {}
-                default_values = {
-                    'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
-                    'E': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
-                    'N': [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
-                    'DE': [0] * 31
-                }
-                
-                start_idx = None
-                for idx, row in enumerate(df_clean.values):
-                    row_str = " ".join([str(x) for x in row])
-                    if "듀티별" in row_str or "인원수" in row_str:
-                        start_idx = idx
-                        break
-                        
-                if start_idx is not None:
-                    # D, E, N, DE까지 탐색하기 위해 행 범위를 4로 확장
-                    for i in range(4):
-                        if start_idx + i < len(df_clean):
-                            row = df_clean.iloc[start_idx + i]
-                            duty = None
-                            for col in df_clean.columns:
-                                if str(col).strip() not in [str(d) for d in range(1, 32)]:
-                                    val_str = str(row[col]).strip().upper()
-                                    if val_str in ['D', 'E', 'N', 'DE']:
-                                        duty = val_str
-                                        break
-                            if duty:
-                                day_values = []
-                                for d in range(1, 32):
-                                    col_name = None
-                                    for col in df_clean.columns:
-                                        if str(col).strip().replace('.0', '') == str(d):
-                                            col_name = col
-                                            break
-                                    
-                                    val = None
-                                    if col_name is not None:
-                                        try:
-                                            val = int(float(row[col_name]))
-                                        except (ValueError, TypeError):
-                                            pass
-                                    
-                                    if val is None or np.isnan(val):
-                                        val = default_values[duty][d-1]
-                                        
-                                    day_values.append(val)
-                                requirements[duty] = day_values
-
-                for duty in ['D', 'E', 'N', 'DE']:
-                    if duty not in requirements or len(requirements[duty]) != 31:
-                        requirements[duty] = default_values[duty]
-                        
-                num_nurses = len(nurses)
-                num_days = 31
-                nurse_groups = [n['group'] for n in nurses]
-                nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
-                forbidden_5_patterns = [
-                    ['D', 'D', 'N', 'N', 'N'], ['D', 'D', 'D', 'N', 'N'], ['D', 'D', 'D', 'D', 'N'],
-                    ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N']
-                ]
-                
-                # [수학적 벌점 충돌 차단 - DE 수량 포함 전면 리팩토링]
-                num_keepers = sum(is_night_keepers)
-                num_normal = num_nurses - num_keepers
-                
-                total_shifts_required = sum(requirements['D']) + sum(requirements['E']) + sum(requirements['N']) + sum(requirements['DE'])
-                total_N_required = sum(requirements['N'])
-                
-                total_keeper_N = num_keepers * 15
-                total_keeper_shifts = num_keepers * 15
-                
-                total_normal_N = max(0, total_N_required - total_keeper_N)
-                total_normal_shifts = max(0, total_shifts_required - total_keeper_shifts)
-                
-                total_normal_nurse_days = num_normal * num_days
-                total_normal_OFF = max(0, total_normal_nurse_days - total_normal_shifts)
-                
-                if num_normal > 0:
-                    avg_normal_N = total_normal_N / num_normal
-                    avg_normal_OFF = total_normal_OFF / num_normal
-                    target_N_min = int(avg_normal_N)
-                    target_N_max = int(avg_normal_N) + 1 if avg_normal_N % 1 != 0 else int(avg_normal_N)
-                    target_OFF_min = int(avg_normal_OFF)
-                    target_OFF_max = int(avg_normal_OFF) + 1 if avg_normal_OFF % 1 != 0 else int(avg_normal_OFF)
-                else:
-                    target_N_min, target_N_max, target_OFF_min, target_OFF_max = 0, 0, 0, 0
-                
-                target_N_max = min(target_N_max, limit_max_monthly_night)
-                target_N_min = min(target_N_min, target_N_max)
-                
-                # ⭐ 4. [고정 근무 보호 대대적 보강]: 야간전담 및 일반 간호사 고정 근무 잠금(is_fixed) 처리
-                is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
-                fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
-                
-                for i, nurse in enumerate(nurses):
-                    row_idx = nurse['row_idx']
-                    row = df_clean.iloc[row_idx]
-                    for d in range(num_days):
-                        col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
-                        raw_val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else ""
-                        
-                        val = ""
-                        if raw_val in ['D', '데이', 'DAY']: val = 'D'
-                        elif raw_val in ['E', '이브', '이브닝', 'EVENING']: val = 'E'
-                        elif raw_val in ['N', '나이트', 'NIGHT']: val = 'N'
-                        elif raw_val in ['DE']: val = 'DE'
-                        elif raw_val in ['OFF', '오프', '휴무', '휴']: val = 'OFF'
-                        elif '교육' in raw_val: val = '교육' # 교육 근무 탐지 및 잠금
-                        
-                        # ⭐ [야간전담 핵심 조건]: 야간전담인 경우 N 입력한 날짜 외에는 무조건 OFF로 고정 및 잠금합니다!
-                        if nurse['is_keeper']:
-                            if val == 'N':
-                                is_fixed[i, d] = True
-                                fixed_shifts[i, d] = 'N'
+                    # 1. 이전 달 근무 데이터 로드 처리
+                    prev_df = None
+                    if uploaded_prev_month is not None:
+                        try:
+                            if uploaded_prev_month.name.endswith('xlsx'):
+                                prev_df = pd.read_excel(uploaded_prev_month)
                             else:
-                                is_fixed[i, d] = True
-                                fixed_shifts[i, d] = 'OFF'
-                        else:
-                            if val in ['D', 'E', 'N', 'DE', 'OFF', '교육']:
-                                is_fixed[i, d] = True
-                                fixed_shifts[i, d] = val
-                                
-                # ⭐ [하루 근무인원 필수 확보 방어책]: 고정된 OFF가 너무 많아 하루 듀티별 인력수(D, E, N, DE)가 부족한 날이 있다면,
+                                prev_df = pd.read_csv(uploaded_prev_month, encoding='utf-8-sig')
+                        except Exception as e:
+                            st.warning(f"경고: 이전 달 근무표를 파싱하는 과정에서 오류가 발생했습니다. 이전 달 근무 연동 없이 연산을 시작합니다. (오류내용: {e})")
+                    
+                    # 2. 간호사 추출 및 야간전담 분류 + 이전달 근무 기록 매핑
+                    nurses = []
+                    is_night_keepers = []
+                    nurse_histories = []
+                    allowed_shifts_list = []
+                    
+                    allowed_col = '가능 근무' if '가능 근무' in df_clean.columns else ('가능근무' if '가능근무' in df_clean.columns else None)
+                    
+                    for idx, row in df_clean.iterrows():
+                        name = row['이름']
+                        group = row['그룹']
+                        nurse_id, is_keeper = parse_nurse_row(name, group)
+                        
+                        if nurse_id is not None:
+                            wanted = row['원티드 오프']
+                            wanted_days = []
+                            if pd.notna(wanted) and str(wanted).strip() != '-':
+                                wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
+                            
+                            # 이전 달 근무 내역 추출
+                            history = extract_nurse_history(prev_df, nurse_id) if prev_df is not None else ['OFF'] * 7
+                            
+                            allowed = parse_allowed_shifts(row[allowed_col]) if allowed_col is not None else {"D", "E", "N", "DE", "OFF", "교육"}
+                            
+                            nurses.append({
+                                'id': nurse_id,
+                                'group': row['그룹'],
+                                'wanted_off': wanted_days,
+                                'row_idx': idx,
+                                'is_keeper': is_keeper
+                            })
+                            is_night_keepers.append(is_keeper)
+                            nurse_histories.append(history)
+                            allowed_shifts_list.append(allowed)
+                            
+                    # 3. 요구 인원수 파싱 (D, E, N, DE)
+                    requirements = {}
+                    default_values = {
+                        'D': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
+                        'E': [3, 3, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4, 3, 3, 4],
+                        'N': [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+                        'DE': [0] * 31
+                    }
+                    
+                    start_idx = None
+                    for idx, row in enumerate(df_clean.values):
+                        row_str = " ".join([str(x) for x in row])
+                        if "듀티별" in row_str or "인원수" in row_str:
+                            start_idx = idx
+                            break
+                            
+                    if start_idx is not None:
+                        # D, E, N, DE까지 탐색하기 위해 행 범위를 4로 확장
+                        for i in range(4):
+                            if start_idx + i < len(df_clean):
+                                row = df_clean.iloc[start_idx + i]
+                                duty = None
+                                for col in df_clean.columns:
+                                    if str(col).strip() not in [str(d) for d in range(1, 32)]:
+                                        val_str = str(row[col]).strip().upper()
+                                        if val_str in ['D', 'E', 'N', 'DE']:
+                                            duty = val_str
+                                            break
+                                if duty:
+                                    day_values = []
+                                    for d in range(1, 32):
+                                        col_name = None
+                                        for col in df_clean.columns:
+                                            if str(col).strip().replace('.0', '') == str(d):
+                                                col_name = col
+                                                break
+                                        
+                                        val = None
+                                        if col_name is not None:
+                                            try:
+                                                val = int(float(row[col_name]))
+                                            except (ValueError, TypeError):
+                                                pass
+                                        
+                                        if val is None or np.isnan(val):
+                                            val = default_values[duty][d-1]
+                                            
+                                        day_values.append(val)
+                                    requirements[duty] = day_values
+
+                    for duty in ['D', 'E', 'N', 'DE']:
+                        if duty not in requirements or len(requirements[duty]) != 31:
+                            requirements[duty] = default_values[duty]
+                            
+                    num_nurses = len(nurses)
+                    num_days = 31
+                    nurse_groups = [n['group'] for n in nurses]
+                    nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
+                    forbidden_5_patterns = [
+                        ['D', 'D', 'N', 'N', 'N'], ['D', 'D', 'D', 'N', 'N'], ['D', 'D', 'D', 'D', 'N'],
+                        ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N']
+                    ]
+                    
+                    # [수학적 벌점 충돌 차단 - DE 수량 포함 전면 리팩토링]
+                    num_keepers = sum(is_night_keepers)
+                    num_normal = num_nurses - num_keepers
+                    
+                    total_shifts_required = sum(requirements['D']) + sum(requirements['E']) + sum(requirements['N']) + sum(requirements['DE'])
+                    total_N_required = sum(requirements['N'])
+                    
+                    total_keeper_N = num_keepers * 15
+                    total_keeper_shifts = num_keepers * 15
+                    
+                    total_normal_N = max(0, total_N_required - total_keeper_N)
+                    total_normal_shifts = max(0, total_shifts_required - total_keeper_shifts)
+                    
+                    total_normal_nurse_days = num_normal * num_days
+                    total_normal_OFF = max(0, total_normal_nurse_days - total_normal_shifts)
+                    
+                    if num_normal > 0:
+                        avg_normal_N = total_normal_N / num_normal
+                        avg_normal_OFF = total_normal_OFF / num_normal
+                        target_N_min = int(avg_normal_N)
+                        target_N_max = int(avg_normal_N) + 1 if avg_normal_N % 1 != 0 else int(avg_normal_N)
+                        target_OFF_min = int(avg_normal_OFF)
+                        target_OFF_max = int(avg_normal_OFF) + 1 if avg_normal_OFF % 1 != 0 else int(avg_normal_OFF)
+                    else:
+                        target_N_min, target_N_max = 0, 0
+                        target_OFF_min, target_OFF_max = 0, 0
+                    
+                    target_N_max = min(target_N_max, limit_max_monthly_night)
+                    target_N_min = min(target_N_min, target_N_max)
+                    
+                    # ⭐ 4. [고정 근무 보호 대대적 보강]: 야간전담 및 일반 간호사 고정 근무 잠금(is_fixed) 처리
+                    is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
+                    fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
+                    
+                    for i, nurse in enumerate(nurses):
+                        row_idx = nurse['row_idx']
+                        row = df_clean.iloc[row_idx]
+                        for d in range(num_days):
+                            col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
+                            raw_val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else ""
+                            
+                            val = ""
+                            if raw_val in ['D', '데이', 'DAY']: val = 'D'
+                            elif raw_val in ['E', '이브', '이브닝', 'EVENING']: val = 'E'
+                            elif raw_val in ['N', '나이트', 'NIGHT']: val = 'N'
+                            elif raw_val in ['DE']: val = 'DE'
+                            elif raw_val in ['OFF', '오프', '휴무', '휴']: val = 'OFF'
+                            elif '교육' in raw_val: val = '교육' # 교육 근무 탐지 및 잠금
+                            
+                            # ⭐ [야간전담 고정 조건 개선]: 야간전담인 경우 초기 템플릿에 N이 적혀있지 않더라도 잠그지 않고 유연하게 열어둡니다!
+                            # 단, N이 이미 적혀있다면 그 자리는 완벽히 고정 잠금(Lock)을 보장합니다.
+                            if nurse['is_keeper']:
+                                if val == 'N':
+                                    is_fixed[i, d] = True
+                                    fixed_shifts[i, d] = 'N'
+                                else:
+                                    # [개선 핵심] 수동 기입된 N이 아니라면 잠그지 않습니다! 단, 가능근무코드가 {'N', 'OFF'}로 자동 제한되어 D/E/DE는 절대 배정되지 않습니다!
+                                    is_fixed[i, d] = False 
+                                    fixed_shifts[i, d] = None
+                            else:
+                                if val in ['D', 'E', 'N', 'DE', 'OFF', '교육']:
+                                    is_fixed[i, d] = True
+                                    fixed_shifts[i, d] = val
+                                    
+                # [하루 근무인원 필수 확보 방어책]: 고정된 OFF가 너무 많아 하루 듀티별 인력수(D, E, N, DE)가 부족한 날이 있다면,
                 # 일반 간호사 중 수동 고정된 OFF를 자동으로 해제하여 요구 인원을 100% 충족하도록 방어합니다!
                 for d in range(num_days):
                     nD_req = requirements['D'][d]
@@ -645,10 +652,10 @@ if st.session_state["schedule_df_state"] is not None:
                 # 5. 하이브리드 고정 스케줄 초기화
                 sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts)
                 
-                # 벌점 계산기 함수 호출 (⭐ 허용 근무 리스트 allowed_shifts_list[i] 연동 완료!)
+                # 벌점 계산기 함수 호출
                 row_penalties = [get_nurse_penalty(sched[i], i, nurse_wanted_off[i], num_days, forbidden_5_patterns, is_night_keepers[i], nurse_histories[i], target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i], allowed_shifts_list[i]) for i in range(num_nurses)]
                 
-                # ⭐ [가변 그룹 자동 균등 배치 연동]: 고정된 unique_groups 배열을 계산하여 연산에 산입합니다.
+                # [가변 그룹 자동 균등 배치 연동]
                 unique_groups = sorted(list(set(nurse_groups)))
                 col_penalties = [get_day_penalty(sched[:, d], num_nurses, nurse_groups, unique_groups) for d in range(num_days)]
                 
@@ -669,7 +676,7 @@ if st.session_state["schedule_df_state"] is not None:
                     while i1 == i2:
                         i2 = random.randint(0, num_nurses - 1)
                         
-                    # ⭐ 고정 근무는 Swap(교환) 과정에서 절대 제외되어 그대로 고정 유지됩니다!
+                    # 고정 근무 교환 제외 보장
                     if is_fixed[i1, d] or is_fixed[i2, d]:
                         continue
                         
