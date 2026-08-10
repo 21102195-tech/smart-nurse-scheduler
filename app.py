@@ -333,7 +333,7 @@ def get_day_penalty(col, num_nurses, nurse_groups, unique_groups):
         
     return penalty
 
-# 하이브리드 고정형 초기 스케줄 생성 함수 (야간전담 초기 배정 최적화 탑재)
+# ⭐ [수학적 인원 규칙 100% 만족형] 하이브리드 고정형 초기 스케줄 생성 함수 (야간전담 초기 배정 최적화 탑재)
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts, is_night_keepers):
     sched = np.empty((num_nurses, num_days), dtype=object)
     for d in range(num_days):
@@ -348,7 +348,8 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
         pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
         pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
         
-        rem_D = max(0, nD - pD - pEDU)
+        # ⭐ [교육 근무의 D 차감 제거!]: 교육은 인력수 계산에서 D로 카운팅 차감하지 않으므로 실제 일하는 데이 인력이 고스란히 100% 배정됩니다!
+        rem_D = max(0, nD - pD) 
         rem_E = max(0, nE - pE)
         rem_N = max(0, nN - pN)
         rem_DE = max(0, nDE - pDE)
@@ -528,14 +529,14 @@ if st.session_state["schedule_df_state"] is not None:
                             row = df_clean.iloc[start_idx + i]
                             duty = None
                             for col in df_clean.columns:
-                                if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
+                                if str(col).strip() not in [str(d) for d in range(1, 32)]:
                                     val_str = str(row[col]).strip().upper()
                                     if val_str in ['D', 'E', 'N', 'DE']:
                                         duty = val_str
                                         break
                             if duty:
                                 day_values = []
-                                for d in range(1, num_days_dynamic + 1):
+                                for d in range(1, 32):
                                     col_name = None
                                     for col in df_clean.columns:
                                         if str(col).strip().replace('.0', '') == str(d):
@@ -644,19 +645,51 @@ if st.session_state["schedule_df_state"] is not None:
                     pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
                     pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
                     
-                    rem_D = max(0, nD_req - pD - pEDU)
+                    # ⭐ [보정 적용]: 교육은 듀티별 필요 데이(D) 요구 인원에 산입하지 않으므로 pEDU 차감을 완전히 제외합니다!
+                    rem_D = max(0, nD_req - pD)
                     rem_E = max(0, nE_req - pE)
                     rem_N = max(0, nN_req - pN)
                     rem_DE = max(0, nDE_req - pDE)
                     
-                    required_working_slots = rem_D + rem_E + rem_N + rem_DE
-                    num_unfixed = sum(1 for i in range(num_nurses) if not is_fixed[i, d])
+                    # ⭐ [이중 방어막 가동]: 데이, 이브닝, DE 근무는 오직 일반 간호사들만 수행할 수 있으므로, 일반 간호사 머릿수가 부족한지 이중 검증합니다!
+                    unfixed_normals_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and not is_night_keepers[i])
+                    required_normal_slots = rem_D + rem_E + rem_DE
                     
-                    # 인력 부족 사태 발생 시
-                    if num_unfixed < required_working_slots:
-                        deficit = required_working_slots - num_unfixed
+                    if unfixed_normals_count < required_normal_slots:
+                        deficit = required_normal_slots - unfixed_normals_count
                         unlocked_count = 0
-                        # 수동 고정된 일반 OFF 중 필요한 개수만큼만 잠금을 풀어 자리를 확보합니다.
+                        # 일반 간호사 수동 OFF 해제 (1순위: 일반 수동 OFF)
+                        for i in range(num_nurses):
+                            if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
+                                if (d+1) not in nurse_wanted_off[i]:
+                                    is_fixed[i, d] = False
+                                    fixed_shifts[i, d] = None
+                                    unlocked_count += 1
+                                    if unlocked_count >= deficit:
+                                        break
+                                        
+                        # 여전히 모자라면 원티드 오프까지 안전 해제 (2순위)
+                        unfixed_normals_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and not is_night_keepers[i])
+                        if unfixed_normals_count < required_normal_slots:
+                            deficit = required_normal_slots - unfixed_normals_count
+                            unlocked_count_wanted = 0
+                            for i in range(num_nurses):
+                                if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
+                                    is_fixed[i, d] = False
+                                    fixed_shifts[i, d] = None
+                                    unlocked_count_wanted += 1
+                                    if unlocked_count_wanted >= deficit:
+                                        break
+                                        
+                    # 전체 총합 요구 인원수 검증 이중 방어막 가동 (전체 출근 인력 확보)
+                    unfixed_keepers_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and is_night_keepers[i])
+                    unfixed_normals_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and not is_night_keepers[i])
+                    total_unfixed = unfixed_normals_count + unfixed_keepers_count
+                    total_required_slots = rem_D + rem_E + rem_N + rem_DE
+                    
+                    if total_unfixed < total_required_slots:
+                        deficit = total_required_slots - total_unfixed
+                        unlocked_count = 0
                         for i in range(num_nurses):
                             if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
                                 is_fixed[i, d] = False
