@@ -165,7 +165,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
     history_len = len(history)
     
     penalty = 0
-    # 천만 점 고정 하드 벌점 수치 격상
+    # 고정 하드 벌점 수치 천만 점 격상
     HARD_PENALTY = 10000000
     
     # 규칙 1: 원티드 오프 준수
@@ -212,7 +212,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
         total_E = sum(1 for x in row_norm[history_len:] if x in ['E', 'DE'])
         if 'D' in allowed_shifts_set and total_D < 3:
             penalty += (3 - total_D) * 100000
-        if 'E' in allowed_shifts_set and total_E < 3:
+        if 'E' in allowed_shifts_set parks and total_E < 3:
             penalty += (3 - total_E) * 100000
         
     consec_work = 0
@@ -527,14 +527,14 @@ if st.session_state["schedule_df_state"] is not None:
                             row = df_clean.iloc[start_idx + i]
                             duty = None
                             for col in df_clean.columns:
-                                if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
+                                if str(col).strip() not in [str(d) for d in range(1, 32)]:
                                     val_str = str(row[col]).strip().upper()
                                     if val_str in ['D', 'E', 'N', 'DE']:
                                         duty = val_str
                                         break
                             if duty:
                                 day_values = []
-                                for d in range(1, num_days_dynamic + 1):
+                                for d in range(1, 31 + 1):
                                     col_name = None
                                     for col in df_clean.columns:
                                         if str(col).strip().replace('.0', '') == str(d):
