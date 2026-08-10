@@ -9,7 +9,7 @@ import re
 # 1. 웹페이지 기본 설정
 st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
 
-# 프로그램 제목 및 설명 부제목 적용 완료
+# ⭐ [프로그램 제목 및 설명 부제목 적용 완료]
 st.title("📊 스마트 널스 스케쥴러")
 st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_allow_html=True)
 st.markdown("---")
@@ -154,6 +154,7 @@ def extract_nurse_history(prev_df, nurse_name):
 
 # 벌점 계산 수식 정의
 def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row, allowed_shifts_set):
+    # ⭐ [교육 근무의 D 치환]: 연속 근무 및 교대 금지 규칙을 위해 교육 근무를 D로 치환한 가상 근무 행을 생성합니다.
     row_norm = []
     for x in (list(history) + list(row_current)):
         if x == '교육':
@@ -212,7 +213,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
         total_E = sum(1 for x in row_norm[history_len:] if x in ['E', 'DE'])
         if 'D' in allowed_shifts_set and total_D < 3:
             penalty += (3 - total_D) * 100000
-        if 'E' in allowed_shifts_set parks and total_E < 3:
+        if 'E' in allowed_shifts_set and total_E < 3:
             penalty += (3 - total_E) * 100000
         
     consec_work = 0
@@ -527,14 +528,14 @@ if st.session_state["schedule_df_state"] is not None:
                             row = df_clean.iloc[start_idx + i]
                             duty = None
                             for col in df_clean.columns:
-                                if str(col).strip() not in [str(d) for d in range(1, 32)]:
+                                if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
                                     val_str = str(row[col]).strip().upper()
                                     if val_str in ['D', 'E', 'N', 'DE']:
                                         duty = val_str
                                         break
                             if duty:
                                 day_values = []
-                                for d in range(1, 31 + 1):
+                                for d in range(1, num_days_dynamic + 1):
                                     col_name = None
                                     for col in df_clean.columns:
                                         if str(col).strip().replace('.0', '') == str(d):
