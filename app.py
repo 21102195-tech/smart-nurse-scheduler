@@ -118,7 +118,7 @@ def load_and_align_headers(df):
             break
     return df
 
-# [이전 달 정보 추출기]
+# [이전 달 정보 추출기] ⭐ 요청하신 상세 매핑 규칙 적용 완료
 def extract_nurse_history(prev_df, nurse_name):
     try:
         df_aligned = load_and_align_headers(prev_df)
@@ -140,12 +140,28 @@ def extract_nurse_history(prev_df, nurse_name):
                 for d in last_7_days:
                     col_name = str(d) if str(d) in df_aligned.columns else (int(d) if int(d) in df_aligned.columns else d)
                     val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
-                    if val in ['D', '데이', 'DAY']: val = 'D'
-                    elif val in ['E', '이브', '이브닝', 'EVENING']: val = 'E'
-                    elif val in ['N', '나이트', 'NIGHT']: val = 'N'
-                    elif val in ['DE']: val = 'DE'
-                    elif '교육' in val: val = '교육'
-                    else: val = 'OFF'
+                    
+                    # 1. 야간 근무 판정 (N, NC1)
+                    if val in ['N', 'NC1', '나이트', 'NIGHT']: 
+                        val = 'N'
+                    # 2. 오프 및 휴무 판정 (C, OF, OF1, V, H, H1, NV, BV, B, S, S10, S2, S3 등)
+                    elif val in ['C', 'OF', 'OF1', 'V', 'H', 'H1', 'NV', 'BV', 'B', 'S', 'S10', 'S2', 'S3', 'OFF', '오프', '휴무', '휴']: 
+                        val = 'OFF'
+                    # 3. 교육 근무 판정 (CPE, P, PE, PE1, PL 등)
+                    elif val in ['CPE', 'P', 'PE', 'PE1', 'PL', '교육', 'EDU']: 
+                        val = '교육'
+                    # 4. 기본 데이 근무 판정
+                    elif val in ['D', '데이', 'DAY']: 
+                        val = 'D'
+                    # 5. 기본 이브닝 근무 판정
+                    elif val in ['E', '이브', '이브닝', 'EVENING']: 
+                        val = 'E'
+                    # 6. 기본 DE 근무 판정
+                    elif val in ['DE']: 
+                        val = 'DE'
+                    # 7. 예외 코드의 경우 OFF 기본값 처리
+                    else: 
+                        val = 'OFF'
                     shifts.append(val)
                 return shifts
     except Exception as e:
@@ -484,7 +500,7 @@ if st.session_state["schedule_df_state"] is not None:
                         if pd.notna(wanted) and str(wanted).strip() != '-':
                             wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
                         
-                        # 이전 달 근무 내역 추출
+                        # 이전 달 근무 내역 추출 (수정된 로직 적용)
                         history = extract_nurse_history(prev_df, nurse_id) if prev_df is not None else ['OFF'] * 7
                         
                         allowed = parse_allowed_shifts(row[allowed_col]) if allowed_col is not None else {"D", "E", "N", "DE", "OFF", "교육"}
@@ -555,7 +571,6 @@ if st.session_state["schedule_df_state"] is not None:
                                         
                                     day_values.append(val)
                                 requirements[duty] = day_values
-
                 for duty in ['D', 'E', 'N', 'DE']:
                     if duty not in requirements or len(requirements[duty]) != num_days_dynamic:
                         requirements[duty] = default_values[duty][:num_days_dynamic]
@@ -617,8 +632,7 @@ if st.session_state["schedule_df_state"] is not None:
                         elif raw_val in ['OFF', '오프', '휴무', '휴']: val = 'OFF'
                         elif '교육' in raw_val: val = '교육' # 교육 근무 탐지 및 잠금
                         
-                        # ⭐ [야간전담 고정 조건 개선]: 야간전담인 경우 초기 템플릿에 N이 적혀있지 않더라도 잠그지 않고 유연하게 열어둡니다!
-                        # 단, N이 이미 적혀있다면 그 자리는 완벽히 고정 잠금(Lock)을 보장합니다.
+                        # ⭐ [야간전담 고정 조건 개선]
                         if nurse['is_keeper']:
                             if val == 'N':
                                 is_fixed[i, d] = True
@@ -631,8 +645,7 @@ if st.session_state["schedule_df_state"] is not None:
                                 is_fixed[i, d] = True
                                 fixed_shifts[i, d] = val
                                 
-                # ⭐ [하루 근무인원 필수 확보 방어책]: 고정된 OFF가 너무 많아 하루 듀티별 인력수(D, E, N, DE)가 부족한 날이 있다면,
-                # 일반 간호사 중 수동 고정된 OFF를 자동으로 해제하여 요구 인원을 100% 충족하도록 방어합니다!
+                # ⭐ [하루 근무인원 필수 확보 방어책]
                 for d in range(num_days):
                     nD_req = requirements['D'][d]
                     nE_req = requirements['E'][d]
@@ -645,20 +658,17 @@ if st.session_state["schedule_df_state"] is not None:
                     pDE = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == 'DE')
                     pEDU = sum(1 for i in range(num_nurses) if is_fixed[i, d] and fixed_shifts[i, d] == '교육')
                     
-                    # ⭐ [보정 적용]: 교육은 듀티별 필요 데이(D) 요구 인원에 산입하지 않으므로 pEDU 차감을 완전히 제외합니다!
                     rem_D = max(0, nD_req - pD)
                     rem_E = max(0, nE_req - pE)
                     rem_N = max(0, nN_req - pN)
                     rem_DE = max(0, nDE_req - pDE)
                     
-                    # ⭐ [이중 방어막 가동]: 데이, 이브닝, DE 근무는 오직 일반 간호사들만 수행할 수 있으므로, 일반 간호사 머릿수가 부족한지 이중 검증합니다!
                     unfixed_normals_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and not is_night_keepers[i])
                     required_normal_slots = rem_D + rem_E + rem_DE
                     
                     if unfixed_normals_count < required_normal_slots:
                         deficit = required_normal_slots - unfixed_normals_count
                         unlocked_count = 0
-                        # 일반 간호사 수동 OFF 해제 (1순위: 일반 수동 OFF)
                         for i in range(num_nurses):
                             if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
                                 if (d+1) not in nurse_wanted_off[i]:
@@ -668,7 +678,6 @@ if st.session_state["schedule_df_state"] is not None:
                                     if unlocked_count >= deficit:
                                         break
                                         
-                        # 여전히 모자라면 원티드 오프까지 안전 해제 (2순위)
                         unfixed_normals_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and not is_night_keepers[i])
                         if unfixed_normals_count < required_normal_slots:
                             deficit = required_normal_slots - unfixed_normals_count
@@ -681,7 +690,6 @@ if st.session_state["schedule_df_state"] is not None:
                                     if unlocked_count_wanted >= deficit:
                                         break
                                         
-                    # 전체 총합 요구 인원수 검증 이중 방어막 가동 (전체 출근 인력 확보)
                     unfixed_keepers_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and is_night_keepers[i])
                     unfixed_normals_count = sum(1 for i in range(num_nurses) if not is_fixed[i, d] and not is_night_keepers[i])
                     total_unfixed = unfixed_normals_count + unfixed_keepers_count
@@ -725,7 +733,6 @@ if st.session_state["schedule_df_state"] is not None:
                     while i1 == i2:
                         i2 = random.randint(0, num_nurses - 1)
                         
-                    # 고정 근무는 Swap(교환) 과정에서 절대 제외되어 그대로 고정 유지됩니다!
                     if is_fixed[i1, d] or is_fixed[i2, d]:
                         continue
                         
