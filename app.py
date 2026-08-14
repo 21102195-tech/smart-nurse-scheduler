@@ -575,11 +575,10 @@ if st.session_state["schedule_df_state"] is not None:
                 nurse_groups = [n['group'] for n in nurses]
                 nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
                 
-                # ⭐ [주 40시간 초과 방지를 위한 금지 근무 패턴 추가 적용]
+                # 40시간 초과 금지 패턴
                 forbidden_5_patterns = [
                     ['D', 'D', 'N', 'N', 'N'], ['D', 'D', 'D', 'N', 'N'], ['D', 'D', 'D', 'D', 'N'],
                     ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N'],
-                    # 🛠️ 신규 40시간 초과 금지 수동 배치 연동 추가!
                     ['DE', 'DE', 'N', 'N', 'N'], 
                     ['DE', 'DE', 'DE', 'N', 'N'], 
                     ['DE', 'DE', 'DE', 'DE', 'N'],
@@ -616,7 +615,7 @@ if st.session_state["schedule_df_state"] is not None:
                 target_N_max = min(target_N_max, limit_max_monthly_night)
                 target_N_min = min(target_N_min, target_N_max)
                 
-                # 고정 근무 보호 처리
+                # 고정 근무 보호 처리 (LOCK 가동)
                 is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                 fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
                 
@@ -646,8 +645,8 @@ if st.session_state["schedule_df_state"] is not None:
                             if val in ['D', 'E', 'N', 'DE', 'OFF', '교육']:
                                 is_fixed[i, d] = True
                                 fixed_shifts[i, d] = val
-                                
-                # 하루 근무인원 필수 확보 방어책
+                
+                # ⭐ [하루 근무인원 필수 확보 방어책]: 오직 수동 고정 'OFF'에 대해서만 해제를 가동하고, 출근 근무는 100% 보존합니다!
                 for d in range(num_days):
                     nD_req = requirements['D'][d]
                     nE_req = requirements['E'][d]
@@ -671,6 +670,7 @@ if st.session_state["schedule_df_state"] is not None:
                         deficit = required_normal_slots - unfixed_normals_count
                         unlocked_count = 0
                         for i in range(num_nurses):
+                            # 오직 'OFF' 고정 근무만 해제 가능하도록 엄격 제어! (D, E, N, DE, 교육은 절대 건드리지 않음)
                             if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
                                 if (d+1) not in nurse_wanted_off[i]:
                                     is_fixed[i, d] = False
@@ -724,7 +724,7 @@ if st.session_state["schedule_df_state"] is not None:
                 best_hard = sum(row_penalties)
                 
                 temp = 25.0
-                cooling_rate = 0.99995  # 최적화 연산 신뢰도를 위해 쿨링 레이트 소폭 상승 조정
+                cooling_rate = 0.99995  
                 
                 # 최적화 루프
                 for step in range(max_iter):
@@ -734,6 +734,7 @@ if st.session_state["schedule_df_state"] is not None:
                     while i1 == i2:
                         i2 = random.randint(0, num_nurses - 1)
                         
+                    # 고정 근무는 Swap(교환) 과정에서 절대 제외되어 그대로 고정 유지됩니다!
                     if is_fixed[i1, d] or is_fixed[i2, d]:
                         continue
                         
