@@ -118,7 +118,7 @@ def load_and_align_headers(df):
             break
     return df
 
-# [이전 달 정보 추출기] ⭐ 요청하신 상세 매핑 규칙 적용 완료
+# [이전 달 정보 추출기]
 def extract_nurse_history(prev_df, nurse_name):
     try:
         df_aligned = load_and_align_headers(prev_df)
@@ -182,7 +182,6 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
     history_len = len(history)
     
     penalty = 0
-    # 고정 하드 벌점 수치 천만 점 격상
     HARD_PENALTY = 10000000
     
     # 규칙 1: 원티드 오프 준수
@@ -346,7 +345,7 @@ def get_day_penalty(col, num_nurses, nurse_groups, unique_groups):
         
     return penalty
 
-# ⭐ [수학적 인원 규칙 100% 만족형] 하이브리드 고정형 초기 스케줄 생성 함수 (야간전담 초기 배정 최적화 탑재)
+# [수학적 인원 규칙 100% 만족형] 하이브리드 고정형 초기 스케줄 생성 함수
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts, is_night_keepers):
     sched = np.empty((num_nurses, num_days), dtype=object)
     for d in range(num_days):
@@ -436,7 +435,6 @@ if st.session_state["schedule_df_state"] is not None:
                 format_func=lambda x: f"{x}번 간호사" if str(x).replace('.0', '').isdigit() else f"{x} 간호사"
             )
         with col2:
-            # ⭐ 희망 휴무일 일수를 동적으로 구성 (30일인 달은 30일까지만 보이도록 수정!)
             selected_offs = st.multiselect("2. 희망 휴무일을 복수 선택하세요", list(range(1, num_days_dynamic + 1)))
             
         if st.button("📝 원티드 오프 신청하기", type="primary"):
@@ -501,7 +499,7 @@ if st.session_state["schedule_df_state"] is not None:
                         if pd.notna(wanted) and str(wanted).strip() != '-':
                             wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
                         
-                        # 이전 달 근무 내역 추출 (수정된 로직 적용)
+                        # 이전 달 근무 내역 추출
                         history = extract_nurse_history(prev_df, nurse_id) if prev_df is not None else ['OFF'] * 7
                         
                         allowed = parse_allowed_shifts(row[allowed_col]) if allowed_col is not None else {"D", "E", "N", "DE", "OFF", "교육"}
@@ -541,7 +539,6 @@ if st.session_state["schedule_df_state"] is not None:
                             row = df_clean.iloc[start_idx + i]
                             duty = None
                             for col in df_clean.columns:
-                                # ⭐ range(1, 32)를 동적 날짜 범위로 수정하여 비교 처리!
                                 if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
                                     val_str = str(row[col]).strip().upper()
                                     if val_str in ['D', 'E', 'N', 'DE']:
@@ -549,7 +546,6 @@ if st.session_state["schedule_df_state"] is not None:
                                         break
                             if duty:
                                 day_values = []
-                                # ⭐ range(1, 32)를 range(1, num_days_dynamic + 1)로 수정하여 한 달 요구량 길이 완벽 동기화!!
                                 for d in range(1, num_days_dynamic + 1):
                                     col_name = None
                                     for col in df_clean.columns:
@@ -578,9 +574,17 @@ if st.session_state["schedule_df_state"] is not None:
                 num_days = num_days_dynamic
                 nurse_groups = [n['group'] for n in nurses]
                 nurse_wanted_off = [set(n['wanted_off']) for n in nurses]
+                
+                # ⭐ [주 40시간 초과 방지를 위한 금지 근무 패턴 추가 적용]
                 forbidden_5_patterns = [
                     ['D', 'D', 'N', 'N', 'N'], ['D', 'D', 'D', 'N', 'N'], ['D', 'D', 'D', 'D', 'N'],
-                    ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N']
+                    ['D', 'E', 'N', 'N', 'N'], ['E', 'E', 'N', 'N', 'N'], ['D', 'D', 'E', 'N', 'N'],
+                    # 🛠️ 신규 40시간 초과 금지 수동 배치 연동 추가!
+                    ['DE', 'DE', 'N', 'N', 'N'], 
+                    ['DE', 'DE', 'DE', 'N', 'N'], 
+                    ['DE', 'DE', 'DE', 'DE', 'N'],
+                    ['DE', 'E', 'N', 'N', 'N'], 
+                    ['DE', 'DE', 'E', 'N', 'N']
                 ]
                 
                 # [수학적 벌점 충돌 차단 - DE 수량 포함 전면 리팩토링]
@@ -612,7 +616,7 @@ if st.session_state["schedule_df_state"] is not None:
                 target_N_max = min(target_N_max, limit_max_monthly_night)
                 target_N_min = min(target_N_min, target_N_max)
                 
-                # ⭐ 4. [고정 근무 보호 대대적 보강]
+                # 고정 근무 보호 처리
                 is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                 fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
                 
@@ -643,7 +647,7 @@ if st.session_state["schedule_df_state"] is not None:
                                 is_fixed[i, d] = True
                                 fixed_shifts[i, d] = val
                                 
-                # ⭐ 5. [하루 근무인원 필수 확보 방어책]
+                # 하루 근무인원 필수 확보 방어책
                 for d in range(num_days):
                     nD_req = requirements['D'][d]
                     nE_req = requirements['E'][d]
@@ -703,7 +707,7 @@ if st.session_state["schedule_df_state"] is not None:
                                 if unlocked_count >= deficit:
                                     break
                 
-                # 5. 하이브리드 고정 스케줄 초기화
+                # 하이브리드 고정 스케줄 초기화
                 sched = initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts, is_night_keepers)
                 
                 # 벌점 계산기 함수 호출
@@ -720,9 +724,9 @@ if st.session_state["schedule_df_state"] is not None:
                 best_hard = sum(row_penalties)
                 
                 temp = 25.0
-                cooling_rate = 0.9999
+                cooling_rate = 0.99995  # 최적화 연산 신뢰도를 위해 쿨링 레이트 소폭 상승 조정
                 
-                # 6. 최적화 루프
+                # 최적화 루프
                 for step in range(max_iter):
                     d = random.randint(0, num_days - 1)
                     i1 = random.randint(0, num_nurses - 1)
