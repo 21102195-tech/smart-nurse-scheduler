@@ -34,6 +34,7 @@ rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강�
 rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True, help="체크 시 밤근무는 무조건 연속 2~3일로 묶어서 배정됩니다.")
 rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True, help="체크 시 특정 경력의 간호사가 한 듀티에 쏠리지 않도록 분산합니다.")
 rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True, help="체크 시 야간 근무 종료 후 최소 2일 연속 OFF를 필수로 보장합니다.")
+rule_no_single_work = st.sidebar.toggle("단독 근무(하루짜리 근무) 금지", value=True, help="체크 시 근무는 최소 연속 2일 이상 배정되도록 유도하여 퐁당퐁당 근무를 방지합니다.")
 
 # 2. 원하는 일수 슬라이더 조절 기능
 limit_max_consec_work = st.sidebar.slider(
@@ -306,6 +307,15 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 next_is_N = (d < num_total - 1 and row_norm[d+1] == 'N')
                 if not prev_is_N and not next_is_N:
                     penalty += HARD_PENALTY
+                    
+    # ⭐ [조건 On/Off] 단독 근무 금지 검사로 퐁당퐁당 방지! (연속 2일 미만 근무 금지)
+    if rule_no_single_work:
+        for d in range(history_len, num_total):
+            if row_norm[d] != 'OFF':
+                prev_is_off = (d == 0 or row_norm[d-1] == 'OFF')
+                next_is_off = (d == num_total - 1 or row_norm[d+1] == 'OFF')
+                if prev_is_off and next_is_off:
+                    penalty += 1000000  # 강한 soft 벌점 부과
                 
     return penalty
 
@@ -526,6 +536,7 @@ if st.session_state["schedule_df_state"] is not None:
                     'DE': [0] * 31
                 }
                 
+                de_allowed_groups = None
                 start_idx = None
                 for idx, row in enumerate(df_clean.values):
                     row_str = " ".join([str(x) for x in row])
@@ -545,6 +556,19 @@ if st.session_state["schedule_df_state"] is not None:
                                         duty = val_str
                                         break
                             if duty:
+                                # ⭐ DE 근무조의 가능 그룹 동적 파싱 및 추출 (한글/영문 전부 완벽 매핑!)
+                                if duty == 'DE':
+                                    for col in df_clean.columns:
+                                        if str(col).strip() not in [str(d) for d in range(1, num_days_dynamic + 1)]:
+                                            val = str(row[col]).strip()
+                                            if pd.notna(row[col]) and val != "" and val.upper() not in ['DE', '듀티별 인원수', '듀티별인원수', 'NAN']:
+                                                tokens = re.split(r'[^A-Za-z0-9가-힣]+', val.upper())
+                                                ignore = {'DE', '듀티별', '인원수', '듀티별인원수', 'NAN', ''}
+                                                groups = {t for t in tokens if t not in ignore}
+                                                if groups:
+                                                    de_allowed_groups = groups
+                                                    break
+                                                    
                                 day_values = []
                                 for d in range(1, num_days_dynamic + 1):
                                     col_name = None
@@ -569,6 +593,14 @@ if st.session_state["schedule_df_state"] is not None:
                 for duty in ['D', 'E', 'N', 'DE']:
                     if duty not in requirements or len(requirements[duty]) != num_days_dynamic:
                         requirements[duty] = default_values[duty][:num_days_dynamic]
+                        
+                # ⭐ [동적 그룹 연동]: 템플릿에서 가져온 de_allowed_groups로 DE 근무코드 목록에서 실시간 차단!
+                if de_allowed_groups is not None:
+                    for i, nurse in enumerate(nurses):
+                        nurse_group = str(nurse['group']).strip().upper() if pd.notna(nurse['group']) else ""
+                        if nurse_group not in de_allowed_groups:
+                            if "DE" in allowed_shifts_list[i]:
+                                allowed_shifts_list[i].remove("DE")
                         
                 num_nurses = len(nurses)
                 num_days = num_days_dynamic
@@ -615,7 +647,7 @@ if st.session_state["schedule_df_state"] is not None:
                 target_N_max = min(target_N_max, limit_max_monthly_night)
                 target_N_min = min(target_N_min, target_N_max)
                 
-                # 고정 근무 보호 처리 (LOCK 가동)
+                # 고정 근무 보호 처리
                 is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                 fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
                 
@@ -646,7 +678,7 @@ if st.session_state["schedule_df_state"] is not None:
                                 is_fixed[i, d] = True
                                 fixed_shifts[i, d] = val
                 
-                # ⭐ [하루 근무인원 필수 확보 방어책]: 오직 수동 고정 'OFF'에 대해서만 해제를 가동하고, 출근 근무는 100% 보존합니다!
+                # 수동 고정 OFF 해제 방어책
                 for d in range(num_days):
                     nD_req = requirements['D'][d]
                     nE_req = requirements['E'][d]
@@ -670,7 +702,6 @@ if st.session_state["schedule_df_state"] is not None:
                         deficit = required_normal_slots - unfixed_normals_count
                         unlocked_count = 0
                         for i in range(num_nurses):
-                            # 오직 'OFF' 고정 근무만 해제 가능하도록 엄격 제어! (D, E, N, DE, 교육은 절대 건드리지 않음)
                             if not is_night_keepers[i] and is_fixed[i, d] and fixed_shifts[i, d] == 'OFF':
                                 if (d+1) not in nurse_wanted_off[i]:
                                     is_fixed[i, d] = False
@@ -734,7 +765,6 @@ if st.session_state["schedule_df_state"] is not None:
                     while i1 == i2:
                         i2 = random.randint(0, num_nurses - 1)
                         
-                    # 고정 근무는 Swap(교환) 과정에서 절대 제외되어 그대로 고정 유지됩니다!
                     if is_fixed[i1, d] or is_fixed[i2, d]:
                         continue
                         
