@@ -119,13 +119,13 @@ def load_and_align_headers(df):
             break
     return df
 
-# [이전 달 정보 추출기]
+# [이전 달 정보 추출기] ⭐ 소수점(.0) 인식을 제거하여 데이터 무시 버그 완벽 보완!
 def extract_nurse_history(prev_df, nurse_name):
     try:
         df_aligned = load_and_align_headers(prev_df)
         day_cols = []
         for col in df_aligned.columns:
-            col_str = str(col).strip()
+            col_str = str(col).strip().replace('.0', '')
             if col_str.isdigit():
                 day_cols.append(int(col_str))
                 
@@ -139,8 +139,17 @@ def extract_nurse_history(prev_df, nurse_name):
             if nurse_id is not None and str(nurse_id) == str(nurse_name):
                 shifts = []
                 for d in last_7_days:
-                    col_name = str(d) if str(d) in df_aligned.columns else (int(d) if int(d) in df_aligned.columns else d)
-                    val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
+                    # 가변적인 타입의 컬럼명을 유연하게 동적 탐색
+                    col_name = None
+                    for col in df_aligned.columns:
+                        if str(col).strip().replace('.0', '') == str(d):
+                            col_name = col
+                            break
+                    
+                    if col_name is not None:
+                        val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
+                    else:
+                        val = "OFF"
                     
                     # 1. 야간 근무 판정 (N, NC1)
                     if val in ['N', 'NC1', '나이트', 'NIGHT']: 
@@ -183,14 +192,14 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
     history_len = len(history)
     
     penalty = 0
-    HARD_PENALTY = 10000000
+    HARD_PENALTY = 10000000  # 엄격한 하드 벌점 수치 (천만 점)
     
-    # 규칙 1: 원티드 오프 준수
+    # 규칙 1: 원티드 오프 준수 (수학적 충돌을 막기 위해 soft penalty로 최우선 가중치 조정)
     for d in range(history_len, num_total):
         current_day = d - history_len + 1
         if current_day in nurse_wanted_off_set and row_norm[d] != 'OFF':
             if not is_fixed_row[current_day - 1]:
-                penalty += 1000000
+                penalty += 500000  # 50만점 (필수 근태 규칙보다 절대 작게 둠)
                 
     # 규칙 2: 간호사별 허용 근무코드 필터링
     for d in range(history_len, num_total):
@@ -238,9 +247,10 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
         shift = row_norm[d]
         if shift != 'OFF':
             consec_work += 1
+            # ⭐ [Strcit 제약화]: 최대 연속 근무 한도 초과 시 HARD_PENALTY(천만점)를 부과하여 6일 연속 근무 완벽 방지!
             if limit_max_consec_work > 0:
                 if consec_work > limit_max_consec_work and d >= history_len:
-                    penalty += (consec_work - limit_max_consec_work) * 500000
+                    penalty += HARD_PENALTY
         else:
             # [조건 On/Off] 5일 연속 근무 후 2 OFF 연속 보장
             if rule_5_consec_off:
@@ -308,14 +318,15 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 if not prev_is_N and not next_is_N:
                     penalty += HARD_PENALTY
                     
-    # ⭐ [조건 On/Off] 단독 근무 금지 검사로 퐁당퐁당 방지! (연속 2일 미만 근무 금지)
+    # [조건 On/Off] 단독 근무 금지 검사로 퐁당퐁당 방지! (연속 2일 미만 근무 금지)
     if rule_no_single_work:
         for d in range(history_len, num_total):
             if row_norm[d] != 'OFF':
                 prev_is_off = (d == 0 or row_norm[d-1] == 'OFF')
                 next_is_off = (d == num_total - 1 or row_norm[d+1] == 'OFF')
                 if prev_is_off and next_is_off:
-                    penalty += 1000000  # 강한 soft 벌점 부과
+                    if not is_fixed_row[d - history_len]:
+                        penalty += HARD_PENALTY  # 수동 고정 근무가 아닐 경우 절대 단독 근무 배정 불가!!
                 
     return penalty
 
@@ -509,7 +520,7 @@ if st.session_state["schedule_df_state"] is not None:
                         if pd.notna(wanted) and str(wanted).strip() != '-':
                             wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
                         
-                        # 이전 달 근무 내역 추출
+                        # 이전 달 근무 내역 추출 (수정된 로직 적용)
                         history = extract_nurse_history(prev_df, nurse_id) if prev_df is not None else ['OFF'] * 7
                         
                         allowed = parse_allowed_shifts(row[allowed_col]) if allowed_col is not None else {"D", "E", "N", "DE", "OFF", "교육"}
