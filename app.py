@@ -99,76 +99,145 @@ def parse_allowed_shifts(val):
     allowed.add('OFF')
     return allowed
 
-# [보정 함수] 헤더 밀림 방지 보정
+# ⭐ [지능형 날짜 정밀 정제 헬퍼]: 문자열, 실수형, datetime 날짜 객체까지 정밀 분석하여 일수(Day)만 추출
+def extract_day_from_header(col):
+    if isinstance(col, (int, np.integer)):
+        return int(col)
+    if isinstance(col, (float, np.floating)):
+        if np.isnan(col):
+            return None
+        return int(col)
+    if hasattr(col, 'day'):
+        return col.day
+        
+    col_str = str(col).strip()
+    match_dt = re.search(r'^\d{4}-\d{2}-\d{2}', col_str)
+    if match_dt:
+        try:
+            dt = pd.to_datetime(col_str)
+            return dt.day
+        except:
+            pass
+            
+    if col_str.endswith('.0'):
+        col_str = col_str[:-2]
+        
+    if col_str.isdigit():
+        return int(col_str)
+        
+    if col_str.endswith('일') and col_str[:-1].isdigit():
+        return int(col_str[:-1])
+        
+    match_ko = re.search(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', col_str)
+    if match_ko:
+        return int(match_ko.group(2))
+        
+    match_short = re.search(r'(\d{1,2})[-./](\d{1,2})', col_str)
+    if match_short:
+        return int(match_short.group(2))
+        
+    return None
+
+# ⭐ [정밀 헤더 보정기]: 템플릿의 소수점, 임의 규격 헤더를 심플한 일 단위 문자열로 완벽 보정
 def load_and_align_headers(df):
-    if '그룹' in df.columns:
-        df.columns = [str(col).strip().replace('.0', '') for col in df.columns]
-        return df
+    has_name = any(str(col).strip() in ['이름', '성명', '간호사', '이 름', '간호사명'] for col in df.columns)
+    has_digit = any(extract_day_from_header(col) is not None for col in df.columns)
     
+    if has_name and has_digit:
+        cleaned_cols = []
+        for col in df.columns:
+            day = extract_day_from_header(col)
+            if day is not None:
+                cleaned_cols.append(str(day))
+            else:
+                col_clean = str(col).strip()
+                if col_clean.endswith('.0'):
+                    col_clean = col_clean[:-2]
+                cleaned_cols.append(col_clean)
+        df.columns = cleaned_cols
+        return df
+        
     for idx in range(min(5, len(df))):
         row_vals = [str(x).strip() for x in df.iloc[idx].values]
-        if '그룹' in row_vals or '그룹 ' in row_vals:
+        contains_name = any(val in ['이름', '성명', '간호사', '이 름', '간호사명', '그룹', '구분'] for val in row_vals)
+        contains_digit = any(extract_day_from_header(val) is not None for val in row_vals)
+        
+        if contains_name and contains_digit:
             new_cols = []
             for col_val in df.iloc[idx].values:
-                val = str(col_val).strip() if pd.notna(col_val) else ""
-                if val.endswith('.0'):
-                    val = val[:-2]
-                new_cols.append(val)
+                day = extract_day_from_header(col_val)
+                if day is not None:
+                    new_cols.append(str(day))
+                else:
+                    val = str(col_val).strip() if pd.notna(col_val) else ""
+                    if val.endswith('.0'):
+                        val = val[:-2]
+                    new_cols.append(val)
             df.columns = new_cols
             df = df.iloc[idx+1:].reset_index(drop=True)
             break
     return df
 
-# [이전 달 정보 추출기] ⭐ 소수점 날짜 헤더(.0) 무시 버그 완벽 패치!
+# ⭐ [이전 달 정보 추출기]
 def extract_nurse_history(prev_df, nurse_name):
     try:
         df_aligned = load_and_align_headers(prev_df)
-        day_cols = []
-        for col in df_aligned.columns:
-            col_str = str(col).strip().replace('.0', '')
-            if col_str.isdigit():
-                day_cols.append(int(col_str))
-                
-        day_cols.sort()
-        last_7_days = day_cols[-7:]
         
+        valid_cols = []
+        for col in df_aligned.columns:
+            col_str = str(col).strip()
+            if col_str.isdigit():
+                valid_cols.append((col, int(col_str)))
+                
+        valid_cols.sort(key=lambda x: x[1])
+        last_7_cols = [x[0] for x in valid_cols[-7:]]
+        
+        # 이름 컬럼 동적 정합성 매핑
+        name_col = None
+        for col in df_aligned.columns:
+            col_clean = str(col).strip().replace(" ", "")
+            if col_clean in ["이름", "성명", "간호사", "간호사명", "name", "nurse", "nursename"]:
+                name_col = col
+                break
+        if name_col is None:
+            for col in df_aligned.columns[:3]:
+                col_clean = str(col).strip().replace(" ", "")
+                if col_clean not in ["그룹", "구분", "group"] and not col_clean.isdigit():
+                    name_col = col
+                    break
+                    
+        if name_col is None:
+            return ['OFF'] * 7
+            
+        group_col = None
+        for col in df_aligned.columns:
+            col_clean = str(col).strip().replace(" ", "")
+            if col_clean in ["그룹", "구분", "group"]:
+                group_col = col
+                break
+                
         for idx, row in df_aligned.iterrows():
-            name = row['이름']
-            group = row['그룹'] if '그룹' in df_aligned.columns else ""
-            nurse_id, _ = parse_nurse_row(name, group)
-            if nurse_id is not None and str(nurse_id) == str(nurse_name):
+            name_val = row[name_col]
+            group_val = row[group_col] if group_col is not None else ""
+            nurse_id, _ = parse_nurse_row(name_val, group_val)
+            
+            if nurse_id is not None and str(nurse_id).strip() == str(nurse_name).strip():
                 shifts = []
-                for d in last_7_days:
-                    col_name = None
-                    for col in df_aligned.columns:
-                        if str(col).strip().replace('.0', '') == str(d):
-                            col_name = col
-                            break
+                for col_name in last_7_cols:
+                    val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
                     
-                    if col_name is not None:
-                        val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else "OFF"
-                    else:
-                        val = "OFF"
-                    
-                    # 1. 야간 근무 판정 (N, NC1)
                     if val in ['N', 'NC1', '나이트', 'NIGHT']: 
                         val = 'N'
-                    # 2. 오프 및 휴무 판정 (C, OF, OF1, V, H, H1, NV, BV, B, S, S10, S2, S3 등)
                     elif val in ['C', 'OF', 'OF1', 'V', 'H', 'H1', 'NV', 'BV', 'B', 'S', 'S10', 'S2', 'S3', 'OFF', '오프', '휴무', '휴']: 
                         val = 'OFF'
-                    # 3. 교육 근무 판정 (CPE, P, PE, PE1, PL 등)
                     elif val in ['CPE', 'P', 'PE', 'PE1', 'PL', '교육', 'EDU']: 
                         val = '교육'
-                    # 4. 기본 데이 근무 판정
                     elif val in ['D', '데이', 'DAY']: 
                         val = 'D'
-                    # 5. 기본 이브닝 근무 판정
                     elif val in ['E', '이브', '이브닝', 'EVENING']: 
                         val = 'E'
-                    # 6. 기본 DE 근무 판정
                     elif val in ['DE']: 
                         val = 'DE'
-                    # 7. 예외 코드의 경우 OFF 기본값 처리
                     else: 
                         val = 'OFF'
                     shifts.append(val)
@@ -176,6 +245,27 @@ def extract_nurse_history(prev_df, nurse_name):
     except Exception as e:
         pass
     return ['OFF'] * 7
+
+# 이전달 존재 진단용
+def check_nurse_exists_in_df(df, nurse_name):
+    try:
+        df_aligned = load_and_align_headers(df)
+        name_col = None
+        for col in df_aligned.columns:
+            col_clean = str(col).strip().replace(" ", "")
+            if col_clean in ["이름", "성명", "간호사", "간호사명", "name", "nurse", "nursename"]:
+                name_col = col
+                break
+        if name_col is not None:
+            for idx, row in df_aligned.iterrows():
+                val = str(row[name_col]).strip()
+                if val.endswith('.0'):
+                    val = val[:-2]
+                if val == str(nurse_name).strip():
+                    return True
+    except:
+        pass
+    return False
 
 # 벌점 계산 수식 정의
 def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row, allowed_shifts_set):
@@ -191,7 +281,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
     history_len = len(history)
     
     penalty = 0
-    HARD_PENALTY = 10000000  # 엄격한 하드 벌점 수치 (천만 점)
+    HARD_PENALTY = 10000000
     
     # 규칙 1: 원티드 오프 준수 (수학적 충돌 방지를 위해 Soft penalty 가중치 최적화)
     for d in range(history_len, num_total):
@@ -317,7 +407,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 if not prev_is_N and not next_is_N:
                     penalty += HARD_PENALTY
                     
-    # ⭐ [조건 On/Off] 단독 근무 금지 벌점을 일백만 점(1,000,000) 수준으로 복구 조정!
+    # [조건 On/Off] 단독 근무 금지 벌점 복구 (연속 2일 미만 근무 금지)
     if rule_no_single_work:
         for d in range(history_len, num_total):
             if row_norm[d] != 'OFF':
@@ -505,6 +595,7 @@ if st.session_state["schedule_df_state"] is not None:
                 is_night_keepers = []
                 nurse_histories = []
                 allowed_shifts_list = []
+                n_missing_history = []  # 이전 달 근무표에서 누락된 간호사 추적 리스트
                 
                 allowed_col = '가능 근무' if '가능 근무' in df_clean.columns else ('가능근무' if '가능근무' in df_clean.columns else None)
                 
@@ -520,7 +611,16 @@ if st.session_state["schedule_df_state"] is not None:
                             wanted_days = [int(float(x.strip())) for x in str(wanted).split(',') if x.strip().replace('.0', '').isdigit()]
                         
                         # 이전 달 근무 내역 추출 (수정된 로직 적용)
-                        history = extract_nurse_history(prev_df, nurse_id) if prev_df is not None else ['OFF'] * 7
+                        history = ['OFF'] * 7
+                        has_history = False
+                        if prev_df is not None:
+                            history = extract_nurse_history(prev_df, nurse_id)
+                            # 실제로 이전 달 근무표에 존재하는지 검증
+                            if history != ['OFF'] * 7 or check_nurse_exists_in_df(prev_df, nurse_id):
+                                has_history = True
+                        
+                        if prev_df is not None and not has_history:
+                            n_missing_history.append(nurse_id)
                         
                         allowed = parse_allowed_shifts(row[allowed_col]) if allowed_col is not None else {"D", "E", "N", "DE", "OFF", "교육"}
                         if is_keeper:
@@ -536,6 +636,10 @@ if st.session_state["schedule_df_state"] is not None:
                         is_night_keepers.append(is_keeper)
                         nurse_histories.append(history)
                         allowed_shifts_list.append(allowed)
+                        
+                # 이전 달 근무표 누락 수간호사 알림 처리
+                if prev_df is not None and n_missing_history:
+                    st.warning(f"⚠️ 이전 달 근무표에서 다음 간호사 선생님의 데이터를 찾지 못해 기본값(OFF 7일)으로 시작합니다 (이름 오타 확인 권장): {', '.join(n_missing_history)}")
                         
                 # 요구량 파싱
                 requirements = {}
@@ -581,14 +685,9 @@ if st.session_state["schedule_df_state"] is not None:
                                                     
                                 day_values = []
                                 for d in range(1, num_days_dynamic + 1):
-                                    col_name = None
-                                    for col in df_clean.columns:
-                                        if str(col).strip().replace('.0', '') == str(d):
-                                            col_name = col
-                                            break
-                                    
+                                    col_name = str(d)
                                     val = None
-                                    if col_name is not None:
+                                    if col_name in df_clean.columns:
                                         try:
                                             val = int(float(row[col_name]))
                                         except (ValueError, TypeError):
@@ -665,8 +764,8 @@ if st.session_state["schedule_df_state"] is not None:
                     row_idx = nurse['row_idx']
                     row = df_clean.iloc[row_idx]
                     for d in range(num_days):
-                        col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
-                        raw_val = str(row[col_name]).strip().upper() if pd.notna(row[col_name]) else ""
+                        col_name = str(d+1)
+                        raw_val = str(row[col_name]).strip().upper() if col_name in df_clean.columns and pd.notna(row[col_name]) else ""
                         
                         val = ""
                         if raw_val in ['D', '데이', 'DAY']: val = 'D'
@@ -765,7 +864,8 @@ if st.session_state["schedule_df_state"] is not None:
                 best_hard = sum(row_penalties)
                 
                 temp = 25.0
-                cooling_rate = 0.99995  
+                # ⭐ [지능형 쿨링 시스템 가동]: 사용자의 탐색 수(max_iter)에 맞춰 최적의 냉각 비율을 수학적으로 동적 배정!
+                cooling_rate = np.exp(np.log(0.01) / max_iter)
                 
                 # 최적화 루프
                 for step in range(max_iter):
@@ -823,7 +923,7 @@ if st.session_state["schedule_df_state"] is not None:
                 for i, nurse in enumerate(nurses):
                     row_idx = nurse['row_idx']
                     for d in range(num_days):
-                        col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
+                        col_name = str(d+1)
                         df_clean.loc[row_idx, col_name] = best_sched[i, d]
                         
                 st.session_state["optimized_result"] = df_clean
