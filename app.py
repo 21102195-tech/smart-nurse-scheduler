@@ -32,7 +32,7 @@ st.sidebar.header("🛠 부서별 맞춤 근무 조건 설정")
 
 # 1. On/Off 토글 규칙들
 rule_5_consec_off = False
-st.sidebar.info("5일 이상 연속근무 금지: 최대 4일까지 배정합니다.")
+st.sidebar.info("5일 초과 연속근무 금지: 최대 5일까지 배정합니다.")
 rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True, help="체크 시 밤근무는 무조건 연속 2~3일로 묶어서 배정됩니다.")
 rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True, help="체크 시 특정 경력의 간호사가 한 듀티에 쏠리지 않도록 분산합니다.")
 rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True, help="체크 시 야간 근무 종료 후 최소 2일 연속 OFF를 필수로 보장합니다.")
@@ -41,8 +41,8 @@ rule_no_single_work = st.sidebar.toggle("단독 근무(하루짜리 근무) 금�
 # 2. 원하는 일수 슬라이더 조절 기능
 limit_max_consec_work = st.sidebar.slider(
     "최대 연속 근무 일수 제한", 
-    min_value=1, max_value=4, value=4, 
-    help="연속 일할 수 있는 한도를 지정합니다. 5일 이상 연속근무는 항상 금지됩니다. (최대 1~4일)"
+    min_value=1, max_value=5, value=5, 
+    help="연속 일할 수 있는 한도를 지정합니다. 6일 이상 연속근무는 항상 금지됩니다. (최대 1~5일)"
 )
 limit_max_monthly_night = st.sidebar.slider(
     "월간 인당 최대 나이트(N) 개수", 
