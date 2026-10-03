@@ -859,12 +859,6 @@ if st.session_state["schedule_df_state"] is not None:
                         
                 audit = validate_generated_schedule(best_sched, nurses, requirements, is_fixed, fixed_shifts, nurse_histories, allowed_shifts_list, forbidden_5_patterns, prev_df is not None)
                 st.session_state['schedule_audit'] = audit
-                if not audit.empty and (audit['구분'] == '위반').any():
-                    st.session_state['optimized_result'] = None
-                    st.error('현재 탐색에서 필수조건을 모두 만족하는 근무표를 찾지 못했습니다. 위반이 있는 근무표는 결과로 출력하지 않습니다.')
-                    st.dataframe(audit[audit['구분'] == '위반'], hide_index=True)
-                    st.info('고정근무와 설정이 충돌하는지 확인하거나 최대 탐색 횟수를 늘려 다시 실행해 주세요. 탐색 실패가 배정 불가능을 뜻하지는 않습니다.')
-                    st.stop()
                 st.session_state['optimized_result'] = df_clean
                 st.session_state['result_rules'] = (limit_max_consec_work, limit_max_monthly_night, limit_max_consec_night, rule_night_after_2_off, rule_no_single_night, rule_no_single_work, rule_group_balance, hashlib.sha256(uploaded_prev_month.getvalue()).hexdigest() if uploaded_prev_month else None, st.session_state['schedule_df_state'].to_json())
                 
