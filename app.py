@@ -172,12 +172,7 @@ def extract_nurse_history(prev_df, nurse_name):
 # 벌점 계산 수식 정의
 def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row, allowed_shifts_set):
     # ⭐ [교육 근무의 D 치환]
-    row_norm = []
-    for x in (list(history) + list(row_current)):
-        if x == '교육':
-            row_norm.append('D')
-        else:
-            row_norm.append(x)
+    row_norm = ['D' if x == '교육' else x for x in (list(history) + list(row_current))]
             
     num_total = len(row_norm)
     history_len = len(history)
@@ -242,14 +237,17 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 if consec_work > limit_max_consec_work and d >= history_len:
                     penalty += (consec_work - limit_max_consec_work) * HARD_PENALTY
         else:
-            # [조건 On/Off] 5일 연속 근무 후 2 OFF 연속 보장
-            if rule_5_consec_off:
-                if consec_work == 5:
-                    if d + 1 < num_total:
-                        if row_norm[d+1] != 'OFF' and (d+1) >= history_len:
-                            penalty += HARD_PENALTY
+            # 5일 근무 직후 2 OFF는 아래의 5번째 근무일에서 검사합니다.
             consec_work = 0
             
+        # 5일째 근무를 마친 다음 2일은 OFF여야 합니다.
+        # 달 마지막 이후의 일정은 현재 데이터가 없어 평가하지 않습니다.
+        if rule_5_consec_off and consec_work == 5:
+            for offset in (1, 2):
+                next_d = d + offset
+                if next_d < num_total and next_d >= history_len and row_norm[next_d] != 'OFF':
+                    penalty += HARD_PENALTY
+ 
         if shift == 'N':
             consec_N += 1
             if consec_N > limit_max_consec_night and d >= history_len:  
@@ -414,36 +412,39 @@ def count_six_day_violations(schedule, histories):
     return violations
  
  
-def eliminate_six_day_work(schedule, histories, is_fixed, max_attempts=10000):
-    # 동일 날짜의 근무코드를 교환하여 일별 필요인원을 보존합니다.
+def eliminate_six_day_work(schedule, histories, is_fixed, max_attempts=10000,
+                           row_score=None):
+    # 날짜별 듀티 수를 유지하면서 6일 연속근무를 우선 제거합니다.
+    # 동점 후보에서는 다른 근무규칙의 전체 벌점도 함께 최소화합니다.
     result = schedule.copy()
     violations = count_six_day_violations(result, histories)
     for _ in range(max_attempts):
         if not violations:
             return result, True
         current_count = len(violations)
-        improved = False
+        best = None
         for i, end in violations:
-            h = len(histories[i])
-            days = [d for d in range(max(0, end-5), end+1) if not is_fixed[i, d] and result[i, d] != 'OFF']
+            days = [d for d in range(max(0, end-5), min(result.shape[1], end+1))
+                    if not is_fixed[i, d] and result[i, d] != 'OFF']
             random.shuffle(days)
             for d in days:
-                partners = [j for j in range(len(result)) if j != i and not is_fixed[j,d] and result[j,d] == 'OFF']
+                partners = [j for j in range(len(result)) if j != i and
+                            not is_fixed[j, d] and result[j, d] == 'OFF']
                 random.shuffle(partners)
                 for j in partners:
-                    result[i,d], result[j,d] = result[j,d], result[i,d]
-                    new_violations = count_six_day_violations(result, histories)
-                    if len(new_violations) < current_count:
-                        violations = new_violations
-                        improved = True
-                        break
-                    result[i,d], result[j,d] = result[j,d], result[i,d]
-                if improved:
-                    break
-            if improved:
-                break
-        if not improved:
+                    result[i, d], result[j, d] = result[j, d], result[i, d]
+                    new_count = len(count_six_day_violations(result, histories))
+                    if new_count < current_count:
+                        cost = row_score(result, i) + row_score(result, j) if row_score else 0
+                        candidate = (new_count, cost, i, j, d)
+                        if best is None or candidate[:2] < best[:2]:
+                            best = candidate
+                    result[i, d], result[j, d] = result[j, d], result[i, d]
+        if best is None:
             return result, False
+        _, _, i, j, d = best
+        result[i, d], result[j, d] = result[j, d], result[i, d]
+        violations = count_six_day_violations(result, histories)
     return result, not bool(count_six_day_violations(result, histories))
  
  
@@ -478,6 +479,17 @@ def audit_final_schedule(schedule, nurses, histories, requirements, wanted_offs,
                     add(name, today, 'N 후 OFF', 'N 종료 직후 OFF 미부여')
                 if k >= 2 and combined[k - 2] == 'N' and combined[k - 1] != 'N' and cur != 'OFF':
                     add(name, today, 'N 후 2 OFF', 'N 종료 후 두 번째 날 OFF 미부여')
+            if rule_5_consec_off and cur != 'OFF':
+                run = 0
+                for x in reversed(combined[:k + 1]):
+                    if x == 'OFF':
+                        break
+                    run += 1
+                if run == 5:
+                    for off_num in (1, 2):
+                        future = k + off_num
+                        if future < len(combined) and future >= h and combined[future] != 'OFF':
+                            add(name, future - h + 1, '5일 근무 후 2 OFF', f'5일 연속 근무 후 {off_num}번째 날 {combined[future]} (OFF 필요)')
             if cur != 'OFF':
                 streak = 0
                 for x in reversed(combined[:k + 1]):
@@ -486,7 +498,7 @@ def audit_final_schedule(schedule, nurses, histories, requirements, wanted_offs,
                 if streak == 6:
                     add(name, today, '연속근무', f'{streak}일 연속 근무')
             if k >= 4 and combined[k - 4:k + 1] in forbidden_patterns:
-                add(name, today, '5일 금지 패턴', ' → '.join(combined[k - 4:k + 1]))
+                add(name, today, '40시간 초과 금지 패턴', ' → '.join(combined[k - 4:k + 1]))
         if not night_keepers[i] and limit_max_monthly_night > 0:
             nights = sum(x == 'N' for x in shifts)
             if nights > limit_max_monthly_night:
@@ -910,13 +922,79 @@ if st.session_state["schedule_df_state"] is not None:
                     if best_hard == 0 and step > 45000:
                         break
                         
+                # [다중 날짜 연계 최적화] 같은 두 간호사의 2~3개 날짜를 동시에 교환합니다.
+                # 날짜별 듀티 수는 그대로 유지하며, 앞뒤 날짜의 전체 근무 흐름을 재평가합니다.
+                # N 고정 및 기타 사전 고정근무는 변경하지 않습니다.
+                st.caption("🔄 여러 날짜를 연계하여 근무조건을 추가 최적화하는 중...")
+                refine_sched = best_sched.copy()
+                refine_rows = [get_nurse_penalty(
+                    refine_sched[i], i, nurse_wanted_off[i], num_days,
+                    forbidden_5_patterns, is_night_keepers[i], nurse_histories[i],
+                    target_N_min, target_N_max, target_OFF_min, target_OFF_max,
+                    is_fixed[i], allowed_shifts_list[i]) for i in range(num_nurses)]
+                refine_six = len(count_six_day_violations(refine_sched, nurse_histories))
+                # 절대 제한을 우선 비교하고, 같은 위반 수에서는 전체 벌점을 최소화합니다.
+                refine_score = sum(refine_rows) + refine_six * 1000000000000
+                for refine_step in range(min(12000, max_iter // 3)):
+                    i1, i2 = random.sample(range(num_nurses), 2)
+                    # 2~3개 날짜를 동시에 선택: 인접일 또는 근처 날짜를 연쇄 조정
+                    span = random.choice((2, 2, 3))
+                    start = random.randrange(max(1, num_days - span + 1))
+                    days = list(range(start, min(num_days, start + span)))
+                    if len(days) < 2 or any(is_fixed[i1, d] or is_fixed[i2, d] for d in days):
+                        continue
+                    if all(refine_sched[i1, d] == refine_sched[i2, d] for d in days):
+                        continue
+                    old1, old2 = refine_sched[i1, days].copy(), refine_sched[i2, days].copy()
+                    refine_sched[i1, days], refine_sched[i2, days] = old2, old1
+                    new1 = get_nurse_penalty(refine_sched[i1], i1, nurse_wanted_off[i1], num_days,
+                        forbidden_5_patterns, is_night_keepers[i1], nurse_histories[i1],
+                        target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i1], allowed_shifts_list[i1])
+                    new2 = get_nurse_penalty(refine_sched[i2], i2, nurse_wanted_off[i2], num_days,
+                        forbidden_5_patterns, is_night_keepers[i2], nurse_histories[i2],
+                        target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed[i2], allowed_shifts_list[i2])
+                    new_six = len(count_six_day_violations(refine_sched, nurse_histories))
+                    new_score = refine_score - refine_rows[i1] - refine_rows[i2] + new1 + new2 + (new_six - refine_six) * 1000000000000
+                    if new_score < refine_score:
+                        refine_rows[i1], refine_rows[i2] = new1, new2
+                        refine_six, refine_score = new_six, new_score
+                    else:
+                        refine_sched[i1, days], refine_sched[i2, days] = old1, old2
+                best_sched = refine_sched
+ 
                 # 최종 강제 검증: 6일 연속 근무가 있으면 교환 보정 후 재검사.
                 # 보정 불가능하면 잘못된 근무표를 최종 결과로 공개하지 않습니다.
-                best_sched, six_day_ok = eliminate_six_day_work(best_sched, nurse_histories, is_fixed)
+                def repair_row_score(candidate, idx):
+                    return get_nurse_penalty(
+                        candidate[idx], idx, nurse_wanted_off[idx], num_days,
+                        forbidden_5_patterns, is_night_keepers[idx], nurse_histories[idx],
+                        target_N_min, target_N_max, target_OFF_min, target_OFF_max,
+                        is_fixed[idx], allowed_shifts_list[idx])
+                best_sched, six_day_ok = eliminate_six_day_work(
+                    best_sched, nurse_histories, is_fixed, row_score=repair_row_score)
                 if not six_day_ok:
                     st.session_state["optimized_result"] = None
                     st.session_state["audit_result"] = None
                     st.error("6일 연속 근무를 완전히 제거할 수 없습니다. 고정근무·OFF·필요인원 조건을 확인한 뒤 다시 생성해 주세요. 6일 연속 근무가 포함된 결과는 제공하지 않습니다.")
+                    st.stop()
+ 
+                # 최종 절대 금지 검증: 6일 연속근무 및 지정 5일 금지 패턴.
+                # 기존 벌점 탐색으로 해결되지 않으면 해당 결과는 공개하지 않습니다.
+                final_forbidden = []
+                for idx in range(num_nurses):
+                    combined = ['D' if x == '교육' else x
+                                for x in list(nurse_histories[idx]) + list(best_sched[idx])]
+                    history_len = len(nurse_histories[idx])
+                    for end in range(max(4, history_len), len(combined)):
+                        if combined[end-4:end+1] in forbidden_5_patterns:
+                            final_forbidden.append((nurses[idx]['id'], end-history_len+1,
+                                                    ' → '.join(combined[end-4:end+1])))
+                if count_six_day_violations(best_sched, nurse_histories) or final_forbidden:
+                    st.session_state["optimized_result"] = None
+                    st.session_state["audit_result"] = None
+                    st.error("절대 금지 조건(6일 연속근무 또는 지정 40시간 초과 금지 패턴)이 남아 있어 최종 근무표를 제공하지 않습니다. 고정근무·필요인원 조건을 확인하고 재생성해 주세요.")
+                    if final_forbidden:
+                        st.dataframe(pd.DataFrame(final_forbidden, columns=['간호사', '종료일', '금지 패턴']))
                     st.stop()
  
                 # 결과를 데이터프레임 매핑
@@ -939,6 +1017,7 @@ if st.session_state["schedule_df_state"] is not None:
             
             # 최종 검수 결과: 위반 사항만 표시 (없으면 검수 완료 안내)
             st.write("### 🔍 최종 근무표 검수내역")
+            st.caption("40시간 초과 여부는 기존에 지정된 5일 금지 근무패턴을 기준으로 검사합니다. 실제 주 40시간은 근무별 인정시간과 주간 기준이 있어야 정확하게 검증할 수 있습니다.")
             audit_df = st.session_state.get("audit_result")
             if audit_df is None:
                 st.info("근무표를 다시 생성하면 검수내역이 표시됩니다.")
@@ -967,3 +1046,5 @@ if st.session_state["schedule_df_state"] is not None:
             )
 else:
     st.info("👈 시작하려면 왼쪽 사이드바에서 '2. 초기 근무표 템플릿 업로드' 파일을 가장 먼저 업로드해 주세요.")
+
+
