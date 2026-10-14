@@ -5,37 +5,37 @@ import random
 import copy
 import io
 import re
- 
+
 # 1. 웹페이지 기본 설정
 st.set_page_config(page_title="스마트 널스 스케쥴러", layout="wide")
- 
+
 # ⭐ [프로그램 제목 및 설명 부제목 적용 완료]
 st.title("📊 스마트 널스 스케쥴러")
 st.markdown("<h5 style='color: gray; font-weight: normal;'>수간호사 관리자 메뉴에서 초기 근무표 템플릿 업로드 후 AI 최종 근무표를 실행할 수 있습니다</h5>", unsafe_allow_html=True)
 st.markdown("---")
- 
+
 # 2. 세션 메모리 초기화
 if "schedule_df_state" not in st.session_state:
     st.session_state["schedule_df_state"] = None
 if "optimized_result" not in st.session_state:
     st.session_state["optimized_result"] = None
- 
+
 # 3. 사이드바 - 관리자 메뉴 및 업로드 버튼
 st.sidebar.header("⚙ 수간호사 관리자 메뉴")
 uploaded_schedule = st.sidebar.file_uploader("1. 초기 근무표 템플릿 업로드 (xlsx/csv)", type=["xlsx", "csv"])
 uploaded_prev_month = st.sidebar.file_uploader("2. 이전 달 근무표 업로드 (선택사항)", type=["xlsx", "csv"])
- 
+
 # 🛠 [부서별 맞춤 근무 조건 설정]
 st.sidebar.markdown("---")
 st.sidebar.header("🛠 부서별 맞춤 근무 조건 설정")
- 
+
 # 1. On/Off 토글 규칙들
 rule_5_consec_off = st.sidebar.toggle("5일 연속 근무 시 후속 2 OFF 강제 보장", value=True, help="체크 시 5일 일하면 무조건 이틀 쉽니다.")
 rule_no_single_night = st.sidebar.toggle("단독 나이트(하루짜리 N) 금지", value=True, help="체크 시 밤근무는 무조건 연속 2~3일로 묶어서 배정됩니다.")
 rule_group_balance = st.sidebar.toggle("듀티별 그룹(A/B/C) 균등 배치 적용", value=True, help="체크 시 특정 경력의 간호사가 한 듀티에 쏠리지 않도록 분산합니다.")
 rule_night_after_2_off = st.sidebar.toggle("야간 근무(N) 후 2일 OFF 필수 부여", value=True, help="체크 시 야간 근무 종료 후 최소 2일 연속 OFF를 필수로 보장합니다.")
 rule_no_single_work = st.sidebar.toggle("단독 근무(하루짜리 근무) 금지", value=True, help="체크 시 근무는 최소 연속 2일 이상 배정되도록 유도하여 퐁당퐁당 근무를 방지합니다.")
- 
+
 # 2. 원하는 일수 슬라이더 조절 기능
 limit_max_consec_work = st.sidebar.slider(
     "최대 연속 근무 일수 제한", 
@@ -52,7 +52,7 @@ limit_max_consec_night = st.sidebar.slider(
     min_value=2, max_value=3, value=3, 
     help="연속으로 밤근무를 서는 최대 일수를 제어합니다. (최소 2일 ~ 최대 3일)"
 )
- 
+
 # [새 파일 업로드 감지] 파일 교체 시 메모리 리셋
 if uploaded_schedule:
     file_key = f"{uploaded_schedule.name}_{uploaded_schedule.size}"
@@ -60,7 +60,7 @@ if uploaded_schedule:
         st.session_state["last_file_key"] = file_key
         st.session_state["schedule_df_state"] = None  
         st.session_state["optimized_result"] = None   
- 
+
 # [지능형 가변 이름 및 야간전담 판정 파서]
 def parse_nurse_row(name, group):
     name_str = str(name).strip() if pd.notna(name) else ""
@@ -79,7 +79,7 @@ def parse_nurse_row(name, group):
         clean_name = clean_name[:-2]
         
     return clean_name, is_keeper
- 
+
 # [지능형 가변 근무코드 추출 파서]
 def parse_allowed_shifts(val):
     if pd.isna(val) or str(val).strip() in ["", "-", "전체", "nan"]:
@@ -98,7 +98,7 @@ def parse_allowed_shifts(val):
         
     allowed.add('OFF')
     return allowed
- 
+
 # [보정 함수] 헤더 밀림 방지 보정
 def load_and_align_headers(df):
     if '그룹' in df.columns:
@@ -118,7 +118,7 @@ def load_and_align_headers(df):
             df = df.iloc[idx+1:].reset_index(drop=True)
             break
     return df
- 
+
 # [이전 달 정보 추출기]
 def extract_nurse_history(prev_df, nurse_name):
     try:
@@ -168,7 +168,7 @@ def extract_nurse_history(prev_df, nurse_name):
     except Exception as e:
         pass
     return ['OFF'] * 7
- 
+
 # 벌점 계산 수식 정의
 def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_5_patterns, is_night_keeper, history, target_N_min, target_N_max, target_OFF_min, target_OFF_max, is_fixed_row, allowed_shifts_set):
     # ⭐ [교육 근무의 D 치환]
@@ -269,15 +269,15 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                 if shift == 'DE' and next_shift == 'D':
                     penalty += HARD_PENALTY
                     
-        # [신규 규칙]: E -> OFF -> D/DE 근무 금지 (교육 포함)
+        # [신규 규칙]: E -> OFF -> D 근무 금지 (교육 포함)
         if d < num_total - 2:
             next_shift = row_norm[d+1]
             day_after_next = row_norm[d+2]
             if (d+2) >= history_len:
-                if shift == 'E' and next_shift == 'OFF' and day_after_next in ['D', 'DE']:
+                if shift == 'E' and next_shift == 'OFF' and day_after_next == 'D':
                     penalty += HARD_PENALTY
-                # [신규 규칙] N ➡ OFF ➡ D/DE 근무 금지
-                if shift == 'N' and next_shift == 'OFF' and day_after_next in ['D', 'DE']:
+                # [신규 규칙] N ➡ OFF ➡ D 근무 금지
+                if shift == 'N' and next_shift == 'OFF' and day_after_next == 'D':
                     penalty += HARD_PENALTY
                 # [신규 규칙] N ➡ OFF ➡ N 근무 금지
                 if not is_night_keeper and shift == 'N' and next_shift == 'OFF' and day_after_next == 'N':
@@ -318,7 +318,7 @@ def get_nurse_penalty(row_current, i, nurse_wanted_off_set, num_days, forbidden_
                     penalty += 1000000  # 강한 soft 벌점 부과
                 
     return penalty
- 
+
 # [가변 그룹 균등 분배 연산 패널]
 def get_day_penalty(col, num_nurses, nurse_groups, unique_groups):
     if not rule_group_balance:
@@ -354,7 +354,7 @@ def get_day_penalty(col, num_nurses, nurse_groups, unique_groups):
         penalty += duty_penalty * 50
         
     return penalty
- 
+
 # [수학적 인원 규칙 100% 만족형] 하이브리드 고정형 초기 스케줄 생성 함수
 def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fixed_shifts, is_night_keepers):
     sched = np.empty((num_nurses, num_days), dtype=object)
@@ -401,7 +401,90 @@ def initialize_schedule_hybrid(num_nurses, num_days, requirements, is_fixed, fix
                 sched[i, d] = pool[normal_idx]
                 normal_idx += 1
     return sched
- 
+
+
+# 검수 전용: 생성 로직에 영향을 주지 않습니다.
+def audit_fixed_inputs(df, nurses, num_days):
+    fixed = np.zeros((len(nurses), num_days), dtype=bool)
+    values = np.full(fixed.shape, None, dtype=object)
+    aliases = {'데이':'D', 'DAY':'D', '이브':'E', '이브닝':'E', 'EVENING':'E', '나이트':'N', 'NIGHT':'N', 'NC1':'N', '오프':'OFF', '휴무':'OFF', '휴':'OFF', 'OF':'OFF', 'OF1':'OFF', 'C':'OFF', 'V':'OFF', 'H':'OFF', 'H1':'OFF', 'NV':'OFF', 'BV':'OFF', 'B':'OFF', 'S':'OFF', 'S10':'OFF', 'S2':'OFF', 'S3':'OFF', 'EDU':'교육', 'CPE':'교육', 'P':'교육', 'PE':'교육', 'PE1':'교육', 'PL':'교육'}
+    for i, nurse in enumerate(nurses):
+        row = df.loc[nurse['row_idx']]
+        for d in range(num_days):
+            col = str(d+1) if str(d+1) in df.columns else d+1
+            raw = str(row.get(col, '')).strip().upper()
+            value = aliases.get(raw, '교육' if '교육' in raw else raw)
+            if value in ['D','E','N','DE','OFF','교육']:
+                fixed[i,d] = True
+                values[i,d] = value
+    return fixed, values
+
+def audit_schedule_violations(sched, nurses, requirements, fixed, fixed_values, histories, allowed, patterns, history_available):
+    issues = []
+    n, days = sched.shape
+    def add(name, dates, rule, detail, level='위반'):
+        issues.append({'구분': level, '직원': str(name), '날짜': dates, '조건': rule, '상세': detail})
+    for d in range(days):
+        for duty, counts in requirements.items():
+            actual = sum(sched[:,d] == duty)
+            if actual != counts[d]:
+                add('전체', f'{d+1}일', '고정 N 인원 확인' if duty == 'N' else '필요인원', f'{duty}: 필요 {counts[d]}명 / 배정 {actual}명', '확인 필요' if duty == 'N' else '위반')
+    for i, nurse in enumerate(nurses):
+        name = nurse['id']
+        raw = list(sched[i])
+        row = ['D' if x == '교육' else x for x in list(histories[i]) + raw]
+        h = len(histories[i])
+        for d, shift in enumerate(raw):
+            if fixed[i,d] and shift != fixed_values[i,d]:
+                add(name, f'{d+1}일', '고정근무·승인 OFF', f'{fixed_values[i,d]} → {shift}')
+            approved_fixed = fixed[i,d] and shift in ['N','교육'] and shift == fixed_values[i,d]
+            if shift not in allowed[i] and not approved_fixed:
+                add(name, f'{d+1}일', '허용 근무', f'{shift}은 허용되지 않음')
+            if d+1 in nurse['wanted_off'] and shift != 'OFF':
+                add(name, f'{d+1}일', '원티드 OFF', f'{shift} 배정', '선호 미충족')
+        work = nights = 0
+        for j, shift in enumerate(row):
+            work = work+1 if shift != 'OFF' else 0
+            nights = nights+1 if shift == 'N' else 0
+            if j < h:
+                continue
+            day = j-h+1
+            if limit_max_consec_work > 0 and work > limit_max_consec_work:
+                add(name, f'{day}일', '연속근무 금지', f'{work}일 연속근무 (최대 {limit_max_consec_work}일)')
+            if rule_5_consec_off and j >= 6 and row[j-1] == 'OFF' and all(x != 'OFF' for x in row[j-6:j-1]) and (j == 6 or row[j-7] == 'OFF') and shift != 'OFF':
+                add(name, f'{day}일', '5일 근무 후 2 OFF', f'{shift} 배정')
+            if nights > limit_max_consec_night and not fixed[i,day-1]:
+                add(name, f'{day}일', '연속 야간', f'{nights}일 연속 N')
+            if j:
+                prev = row[j-1]
+                if (prev == 'E' and shift in ['D','DE']) or (prev == 'N' and shift in ['D','E','DE']) or (prev == 'DE' and shift == 'D'):
+                    add(name, f'{day}일 (전날 포함)', '금지 근무조합', f'{prev} → {shift}')
+            if j >= 2:
+                triple = row[j-2:j+1]
+                if triple in [['E','OFF','D'], ['N','OFF','D']] or (not nurse['is_keeper'] and triple == ['N','OFF','N']):
+                    add(name, f'{max(1,day-2)}~{day}일 (이전 달 포함 가능)', '금지 근무조합', ' → '.join(triple))
+            if j >= 4 and row[j-4:j+1] in patterns:
+                add(name, f'{max(1,day-4)}~{day}일', '금지 5일 패턴', ' → '.join(row[j-4:j+1]))
+            if rule_night_after_2_off:
+                if (j >= 1 and row[j-1] == 'N' and shift not in ['N','OFF']) or (j >= 2 and row[j-2] == 'N' and row[j-1] != 'N' and shift != 'OFF'):
+                    add(name, f'{day}일', '야간 후 2 OFF', f'{shift} 배정')
+            if rule_no_single_night and shift == 'N' and not fixed[i,day-1] and (j == 0 or row[j-1] != 'N'):
+                if j+1 < len(row) and row[j+1] != 'N':
+                    add(name, f'{day}일', '단독 나이트', '하루짜리 N')
+                elif j+1 == len(row):
+                    add(name, f'{day}일', '월말 야간 연결', '다음 달 N 또는 휴무 확인 필요', '확인 필요')
+            if rule_no_single_work and shift != 'OFF' and (j == 0 or row[j-1] == 'OFF'):
+                if j+1 < len(row) and row[j+1] == 'OFF':
+                    add(name, f'{day}일', '단독 근무', '하루짜리 근무', '선호 미충족')
+        total_n = raw.count('N')
+        # 모든 N은 고정 입력입니다. 월 N 개수 자체는 위반으로 보지 않습니다.
+        if rule_night_after_2_off and 'N' in raw[-2:]:
+            add(name, f'{max(1,days-1)}~{days}일', '월말 야간 후 휴무', '다음 달 근무표에서 야간 종료 후 2 OFF 확인 필요', '확인 필요')
+        if not history_available or not nurse.get('history_known', True):
+            add(name, '1일 (이전 달 연결)', '월초 연결', '이전 달 근무자료 미제공: 월초 연속근무·근무조합 추가 확인 필요', '확인 필요')
+    result = pd.DataFrame(issues, columns=['구분','직원','날짜','조건','상세'])
+    return result[result['구분'] == '위반'].drop(columns=['구분']).reset_index(drop=True)
+
 # 4. 파일 데이터 로드 및 갱신 시스템
 if uploaded_schedule and st.session_state["schedule_df_state"] is None:
     try:
@@ -412,7 +495,7 @@ if uploaded_schedule and st.session_state["schedule_df_state"] is None:
         st.session_state["schedule_df_state"] = load_and_align_headers(raw_df)
     except Exception as e:
         st.error(f"템플릿 파일을 읽는 중 오류가 발생했습니다: {e}")
- 
+
 # 5. 메인 인터페이스부
 if st.session_state["schedule_df_state"] is not None:
     df_temp = st.session_state["schedule_df_state"]
@@ -420,7 +503,7 @@ if st.session_state["schedule_df_state"] is not None:
     # 가변 날짜 동적 감지
     day_cols_detected = [int(col) for col in df_temp.columns if str(col).strip().isdigit()]
     num_days_dynamic = max(day_cols_detected) if day_cols_detected else 31
- 
+
     tab_apply, tab_check, tab_result = st.tabs([
         "🙋‍♀ [간호사용] 원티드 오프 신청", 
         "📋 [관리자용] 신청 및 고정 근무 확인", 
@@ -647,6 +730,8 @@ if st.session_state["schedule_df_state"] is not None:
                 target_N_max = min(target_N_max, limit_max_monthly_night)
                 target_N_min = min(target_N_min, target_N_max)
                 
+                # 원본 고정입력 검수용 사본 (기존 배정 로직은 변경하지 않음)
+                audit_fixed, audit_fixed_values = audit_fixed_inputs(df_clean, nurses, num_days)
                 # 고정 근무 보호 처리
                 is_fixed = np.zeros((num_nurses, num_days), dtype=bool)
                 fixed_shifts = np.empty((num_nurses, num_days), dtype=object)
@@ -816,12 +901,24 @@ if st.session_state["schedule_df_state"] is not None:
                         col_name = str(d+1) if str(d+1) in df_clean.columns else (int(d+1) if int(d+1) in df_clean.columns else d+1)
                         df_clean.loc[row_idx, col_name] = best_sched[i, d]
                         
+                st.session_state['violations_only'] = audit_schedule_violations(best_sched, nurses, requirements, audit_fixed, audit_fixed_values, nurse_histories, allowed_shifts_list, forbidden_5_patterns, prev_df is not None)
                 st.session_state["optimized_result"] = df_clean
                 st.balloons()
                 
         if st.session_state["optimized_result"] is not None:
             st.write("### 🎉 생성 완료된 최종 근무표")
             st.dataframe(st.session_state["optimized_result"])
+
+            # 추가 기능: 실제 위반 내역만 표시 (생성·다운로드는 유지)
+            st.write('### 🔎 검수 결과 — 위반 사항')
+            violations = st.session_state.get('violations_only')
+            if violations is None:
+                st.info('위반 검수를 보려면 근무표를 다시 생성해 주세요.')
+            elif violations.empty:
+                st.success('검수한 조건에서 위반 사항이 없습니다. 고정 N 자체와 선호사항·월 경계 확인 항목은 이 표에 포함하지 않습니다.')
+            else:
+                st.warning(f'위반 사항 {len(violations)}건이 있습니다. 직원·날짜별 내용을 확인해 주세요.')
+                st.dataframe(violations, hide_index=True)
             
             # Excel 다운로드 기능 제공
             towrite = io.BytesIO()
